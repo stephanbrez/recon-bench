@@ -2,5 +2,34 @@
 name = "recon-bench"
 version = "0.1.0"
 description = "Add your description here"
-requires-python = ">=3.14"
-dependencies = []
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.4.4",
+    "open3d",
+    "pillow>=12.1.1",
+    "torch>=2.10.0",
+    "torchmetrics>=1.9.0",
+]
+
+[tool.uv]
+# Require that the package is available for linux ARM.
+required-environments = [
+        "sys_platform == 'linux' and platform_machine == 'aarch64'",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
+torchvision = { index = "pytorch-cu130" }
+pytorch3d = { git = "https://github.com/facebookresearch/pytorch3d.git", rev = "stable" }
+open3d = { path = "../Open3D/wheels/open3d-0.19.0+9ddc15d1c-cp312-cp312-manylinux_2_39_aarch64.whl" }
+
+[dependency-groups]
+dev = [
+    "setuptools>=82.0.0",
+    "wheel>=0.46.3",
+]
