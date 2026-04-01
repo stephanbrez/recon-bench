@@ -26,6 +26,13 @@ class MemoryTracker:
     When CUDA is not available, all measurements report zero and
     ``cuda_available`` is False.
 
+    Parameters
+    ----------
+    enabled : bool
+        If False, ``section()`` becomes a no-op and ``get_report()`` returns
+        an empty list. Allows toggling profiling without restructuring
+        call sites. Default True.
+
     Examples
     --------
     >>> tracker = MemoryTracker()
@@ -34,8 +41,9 @@ class MemoryTracker:
     >>> report = tracker.get_report()
     """
 
-    def __init__(self) -> None:
+    def __init__(self, enabled: bool = True) -> None:
         self._cuda_available = torch.cuda.is_available()
+        self._enabled = enabled
         self._root_entries: list[_profile.MemoryEntry] = []
         self._stack: list[_profile.MemoryEntry] = []
 
@@ -58,6 +66,10 @@ class MemoryTracker:
         ------
         None
         """
+        if not self._enabled:
+            yield
+            return
+
         entry = _profile.MemoryEntry(name=name, peak_mb=0.0, delta_mb=0.0)
 
         # ─── Attach to parent or root ───

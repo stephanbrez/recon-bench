@@ -27,6 +27,10 @@ class Timer:
     sync_cuda : bool
         If True and CUDA is available, call ``torch.cuda.synchronize()``
         before each timing measurement. Default True.
+    enabled : bool
+        If False, ``section()`` becomes a no-op and ``get_report()`` returns
+        an empty list. Allows toggling profiling without restructuring
+        call sites. Default True.
 
     Examples
     --------
@@ -38,8 +42,9 @@ class Timer:
     >>> print(timer.get_report())
     """
 
-    def __init__(self, sync_cuda: bool = True) -> None:
+    def __init__(self, sync_cuda: bool = True, enabled: bool = True) -> None:
         self._sync_cuda = sync_cuda and torch.cuda.is_available()
+        self._enabled = enabled
         self._root_entries: list[_profile.TimingEntry] = []
         self._stack: list[_profile.TimingEntry] = []
 
@@ -57,6 +62,10 @@ class Timer:
         ------
         None
         """
+        if not self._enabled:
+            yield
+            return
+
         if self._sync_cuda:
             torch.cuda.synchronize()
 
