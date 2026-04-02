@@ -253,3 +253,100 @@ class EvalResult:
     geometry_metrics: dict[str, torch.Tensor] | None = None
     rendered_images: dict[str, torch.Tensor] | None = None
     profile: ProfileResult | None = None
+
+    def summary(self) -> str:
+        """
+        Return a compact mean-metrics overview.
+
+        Shows one table per metric group (image, geometry) with the mean
+        value for each metric. Appends the profiling tree if present.
+
+        Returns
+        -------
+        str
+            Multi-line formatted string.
+        """
+        from .utils import format as _fmt
+
+        sections: list[str] = []
+
+        for heading, metrics in [
+            ("📊 Image Metrics", self.image_metrics),
+            ("📐 Geometry Metrics", self.geometry_metrics),
+        ]:
+            if metrics is None:
+                continue
+
+            headers = ["Metric", "Mean"]
+            rows = [
+                [name, f"{tensor.mean().item():.4f}"]
+                for name, tensor in metrics.items()
+            ]
+            sections.append(heading)
+            sections.append(_fmt.format_table(headers, rows))
+
+        if self.profile is not None:
+            sections.append("")
+            sections.append(self.profile.summary())
+
+        return "\n".join(sections)
+
+    def detail(
+        self,
+        filenames: list[str] | None = None,
+    ) -> str:
+        """
+        Return a per-item breakdown table.
+
+        Shows one table per metric group with a row for every evaluated
+        item. When *filenames* is provided the table uses those labels;
+        otherwise items are numbered.
+
+        Parameters
+        ----------
+        filenames : list[str] or None
+            Optional labels for each item (e.g. source file stems). Must
+            match the number of items in the metric tensors.
+
+        Returns
+        -------
+        str
+            Multi-line formatted string, or empty string when all metric
+            groups have N <= 1.
+        """
+        from .utils import format as _fmt
+
+        sections: list[str] = []
+
+        for heading, metrics in [
+            ("📊 Image Metrics (per item)", self.image_metrics),
+            ("📐 Geometry Metrics (per item)", self.geometry_metrics),
+        ]:
+            if metrics is None:
+                continue
+
+            first_tensor = next(iter(metrics.values()))
+            n_items = first_tensor.shape[0]
+            if n_items <= 1:
+                continue
+
+            metric_names = list(metrics.keys())
+            headers = ["Item"] + metric_names
+
+            labels: list[str]
+            if filenames is not None:
+                labels = filenames
+            else:
+                labels = [str(i) for i in range(n_items)]
+
+            rows: list[list[str]] = []
+            for idx, label in enumerate(labels):
+                row = [label]
+                for name in metric_names:
+                    row.append(f"{metrics[name][idx].item():.4f}")
+                rows.append(row)
+
+            sections.append(heading)
+            sections.append(_fmt.format_table(headers, rows))
+
+        return "\n".join(sections)

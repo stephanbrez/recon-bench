@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import dataclasses
 
+from ..utils import format as _fmt
+
 
 @dataclasses.dataclass(slots=True)
 class TimingEntry:
@@ -101,8 +103,6 @@ class ProfileResult:
 
 # ===== Formatting Helpers =====
 
-_BYTES_PER_MIB = 1024 * 1024
-
 
 def _format_timing(
     entry: TimingEntry,
@@ -111,12 +111,13 @@ def _format_timing(
     is_last: bool,
 ) -> None:
     """Recursively format a TimingEntry with tree decorations."""
-    connector = "└── " if is_last else "├── "
-    lines.append(f"{prefix}{connector}{entry.name}: {entry.duration_s:.4f}s")
-    child_prefix = prefix + ("    " if is_last else "│   ")
+    label = f"{entry.name}: {entry.duration_s:.4f}s"
+    _fmt.format_tree_node(label, lines, prefix, is_last)
+    new_prefix = _fmt.child_prefix(prefix, is_last)
     for i, child in enumerate(entry.children):
         _format_timing(
-            child, lines, child_prefix, is_last=(i == len(entry.children) - 1),
+            child, lines, new_prefix,
+            is_last=(i == len(entry.children) - 1),
         )
 
 
@@ -127,14 +128,15 @@ def _format_memory(
     is_last: bool,
 ) -> None:
     """Recursively format a MemoryEntry with tree decorations."""
-    connector = "└── " if is_last else "├── "
-    lines.append(
-        f"{prefix}{connector}{entry.name}: "
+    label = (
+        f"{entry.name}: "
         f"peak {entry.peak_mb:.1f} MiB, "
         f"delta {entry.delta_mb:+.1f} MiB"
     )
-    child_prefix = prefix + ("    " if is_last else "│   ")
+    _fmt.format_tree_node(label, lines, prefix, is_last)
+    new_prefix = _fmt.child_prefix(prefix, is_last)
     for i, child in enumerate(entry.children):
         _format_memory(
-            child, lines, child_prefix, is_last=(i == len(entry.children) - 1),
+            child, lines, new_prefix,
+            is_last=(i == len(entry.children) - 1),
         )
