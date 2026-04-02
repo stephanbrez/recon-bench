@@ -39,7 +39,20 @@ result = recon_bench.evaluate(Path("reference.png"), Path("model.obj"), camera=c
 ```
 
 All metric values are `torch.Tensor` of shape `(N,)` — one score per item or
-view. Call `.mean()` to reduce to a scalar.
+view. Call `.mean()` to reduce to a scalar. Use `result.summary()` for a
+formatted report:
+
+```python
+print(result.summary())
+```
+
+```
+📊 Image Metrics
+Metric  │  Mean
+──┼──────
+psnr    │  32.4000
+ssim    │  0.9100
+```
 
 ## Evaluation Modes
 
@@ -215,12 +228,77 @@ print(report.summary())
 Sections can be nested arbitrarily deep. On CPU-only systems, `MemoryTracker`
 reports all zeros gracefully.
 
+### Toggling Profiling
+
+Pass `enabled=False` to either class to make all `section()` calls no-ops
+without changing any call sites. `get_report()` returns an empty list when
+disabled.
+
+```python
+profiling_on = False
+
+timer = recon_bench.Timer(enabled=profiling_on)
+mem = recon_bench.MemoryTracker(enabled=profiling_on)
+
+with timer.section("train"):   # no-op when disabled
+    train()
+
+timer.get_report()  # [] when disabled
+```
+
+## CLI
+
+Installing the package exposes the `rb` command with subcommands for
+common evaluation tasks.
+
+### `rb eval-images`
+
+Batch image-vs-image evaluation. Images are sorted by name and paired
+positionally. If directories have different image counts, a warning is
+printed and evaluation proceeds up to the smaller count.
+
+| Short | Long | Description |
+|---|---|---|
+| `-t` | `--target` | Directory of ground-truth images (required) |
+| `-p` | `--prediction` | Directory of predicted images (required) |
+| `-m` | `--metrics` | Space-separated metric names; omit for all |
+| `-P` | `--profile` | Enable timing + GPU memory profiling |
+| `-s` | `--summary-only` | Show only mean metrics, suppress per-item detail |
+| `-M` | `--match-names` | Pair by filename stem instead of sorted position; unmatched files are skipped |
+
+```bash
+rb eval-images -t data/gt/ -p data/pred/
+rb eval-images -t data/gt/ -p data/pred/ -m psnr ssim
+rb eval-images -t data/gt/ -p data/pred/ -P
+rb eval-images -t data/gt/ -p data/pred/ -s
+```
+
+```
+Evaluating 4 image pairs ...
+
+📊 Image Metrics
+Metric          │    Mean
+──┼──────────────────────
+psnr            │  30.2145
+ssim            │   0.9012
+ssim_windowed   │   0.8834
+lpips           │   0.0521
+
+📊 Image Metrics (per item)
+Item    │    psnr  │    ssim  │  ssim_windowed  │   lpips
+──┼──────────┼──────────┼──────────────────┼─────────
+img_00  │  32.410  │  0.9210  │         0.9050  │  0.0410
+img_01  │  28.130  │  0.8750  │         0.8520  │  0.0680
+img_02  │  31.200  │  0.9150  │         0.8980  │  0.0440
+img_03  │  29.118  │  0.8940  │         0.8785  │  0.0554
+```
+
 ## Dependencies
 
 | Package | Purpose |
 |---|---|
-| `torch`, `torchvision` | Tensor operations, image transforms |
+| `torch` | Tensor operations, GPU compute |
 | `numpy` | Array operations |
 | `open3d` | Geometry I/O, mesh metrics, offscreen rendering |
-| `torchmetrics[image]` | SSIM (windowed), LPIPS implementations |
+| `torchmetrics` | SSIM (windowed), LPIPS implementations |
 | `Pillow` | Image file I/O |

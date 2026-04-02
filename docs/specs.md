@@ -1,5 +1,12 @@
 # Recon-Bench Evaluation API — Specification
 
+> **Scope**: This document is the internal developer reference — architecture,
+> implementation patterns, type contracts, and extension points. It is written
+> for contributors working on the library itself.
+>
+> For **user-facing documentation** (installation, API usage, CLI flags,
+> examples), see [`README.md`](../README.md).
+
 ## Overview
 
 Recon-bench is a modular 3D reconstruction benchmarking toolkit. It provides a
@@ -45,7 +52,11 @@ src/
 ├── utils/
 │   ├── __init__.py
 │   ├── image.py             # Tensor normalization (to_normalized_tensor)
-│   └── batch.py             # Batching helpers (ensure_batch, unbatch)
+│   ├── batch.py             # Batching helpers (ensure_batch, unbatch)
+│   └── format.py            # Plain-text table and tree formatting
+├── cli/
+│   ├── __init__.py          # Top-level ``rb`` dispatcher (argparse subcommands)
+│   └── eval_images.py       # ``rb eval-images``: batch image-vs-image evaluation
 ├── geometry/
 ├── datasets/
 └── models/
@@ -208,6 +219,12 @@ Metric tensors are **not** mean-reduced — users call `.mean()`, `.std()`, or
 index individual items as needed. This preserves per-view detail for multi-view
 evaluation.
 
+`summary()` returns a compact mean-metrics overview (one table per metric
+group, plus the profiling tree if present). `detail(filenames=None)` returns a
+per-item breakdown table when `N > 1`, using *filenames* as row labels (falls
+back to numeric indices when omitted). The two methods are independent —
+library users can call either or both.
+
 ## Batching
 
 Every public function handles both single and batched inputs. Users can call
@@ -360,7 +377,7 @@ managers (or falls through as a no-op when profiling is disabled).
 Hierarchical wall-clock timer using `time.perf_counter()`.
 
 ```python
-Timer(sync_cuda: bool = True)
+Timer(sync_cuda: bool = True, enabled: bool = True)
 ```
 
 - `section(name)` — context manager; nestable for sub-steps
@@ -371,17 +388,25 @@ available, `torch.cuda.synchronize()` is called before each start/stop
 measurement. This is required because GPU operations are asynchronous — without
 synchronization, wall-clock timings will undercount GPU work.
 
+**Toggling**: When `enabled=False`, `section()` is a no-op and `get_report()`
+returns `[]`. CUDA synchronization is also skipped. This allows profiling to be
+toggled via a flag without modifying call sites.
+
 ### `MemoryTracker` (`profiling/memory.py`)
 
 GPU memory tracker using `torch.cuda` memory statistics.
 
 ```python
-MemoryTracker()
+MemoryTracker(enabled: bool = True)
 ```
 
 - `section(name)` — context manager; nestable for sub-steps
 - `get_report()` → `list[MemoryEntry]` — returns the memory tree
 - `cuda_available` — `bool` property
+
+**Toggling**: When `enabled=False`, `section()` is a no-op and `get_report()`
+returns `[]`. This allows profiling to be toggled via a flag without modifying
+call sites.
 
 **Key `torch.cuda` APIs used per section:**
 - `reset_peak_memory_stats()` at entry
@@ -438,6 +463,31 @@ else:
 This requires `from __future__ import annotations` at the top of `_types.py`
 so that the annotation `ProfileResult | None` is a string at runtime (PEP 563).
 
+## CLI
+
+The package exposes a single `rb` entry point via `[project.scripts]` in
+`pyproject.toml`, dispatched through `cli/__init__.py` using argparse
+subcommands.
+
+### Adding a new subcommand
+
+Each subcommand is a module in `cli/` that exposes two functions:
+
+- `register(subparsers)` — adds the subparser and sets `func=run` as default
+- `run(args)` — executes the command; heavy imports (e.g. `import recon_bench`)
+  happen here to keep CLI startup fast
+
+To add a command (e.g. `rb eval-meshes`):
+
+1. Create `cli/eval_meshes.py` with `register()` and `run()`
+2. Import and call `eval_meshes.register(subparsers)` in `cli/__init__.py`
+
+### Conventions
+
+- All flags must have both short (`-t`) and long (`--target`) forms
+- Short flags use lowercase; `-P` (uppercase) is reserved for `--profile` to
+  avoid conflict with `-p` (`--prediction`)
+
 ## Design Decisions
 
 | Decision | Rationale |
@@ -456,13 +506,15 @@ so that the annotation `ProfileResult | None` is a string at runtime (PEP 563).
 | Per-item tensor scores (no auto-mean) | Preserves per-view/per-item detail; users call `.mean()` when needed |
 | `Camera.orbit_ring()` returns `list[Camera]` | Simple composition — no special multi-camera type; reuses `Camera.orbit()` |
 | Multi-view `image_vs_mesh` requires matching `list[ImageInput]` | Each camera needs its own reference image; mismatched counts are a `ValueError` |
+| Shared `utils/format.py` for display | Both `ProfileResult.summary()` and `EvalResult.summary()` use the same table/tree primitives; no external dep (e.g. rich) needed |
+| `EvalResult.summary()` with optional filenames | Provides a ready-made report; filenames give human-friendly row labels without coupling to I/O |
 
 ## Dependencies
 
 | Package | Purpose |
 |---|---|
-| `torch`, `torchvision` | Tensor operations, image transforms |
+| `torch` | Tensor operations, GPU compute |
 | `numpy` | Array operations |
 | `open3d` | Geometry I/O, mesh metrics, offscreen rendering |
-| `torchmetrics[image]` | SSIM (windowed), LPIPS implementations |
+| `torchmetrics` | SSIM (windowed), LPIPS implementations |
 | `Pillow` | Image file I/O |
