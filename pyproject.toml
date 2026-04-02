@@ -11,6 +11,9 @@ dependencies = [
     "torchmetrics>=1.9.0",
 ]
 
+[project.scripts]
+rb = "recon_bench.cli:main"
+
 [tool.uv]
 # Require that the package is available for linux ARM.
 required-environments = [
