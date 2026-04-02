@@ -8,6 +8,7 @@ import torch
 import torchmetrics
 
 from ..io import geometry
+from ..io import image as _io_image
 from ..utils import batch
 from .. import _types
 
@@ -48,7 +49,6 @@ def psnr(
     ValueError
         If target and data batch sizes differ.
     """
-    from ..io import image as _io_image
     y_true = _io_image.load_image(target)
     y_pred = _io_image.load_image(data)
     _validate_image_batch(y_true, y_pred)
@@ -81,7 +81,6 @@ def ssim(
     ValueError
         If target and data batch sizes differ.
     """
-    from ..io import image as _io_image
     y_true = _io_image.load_image(target)
     y_pred = _io_image.load_image(data)
     _validate_image_batch(y_true, y_pred)
@@ -133,7 +132,6 @@ def ssim_windowed(
     ValueError
         If target and data batch sizes differ.
     """
-    from ..io import image as _io_image
     y_true = _io_image.load_image(target)
     y_pred = _io_image.load_image(data)
     _validate_image_batch(y_true, y_pred)
@@ -175,7 +173,6 @@ def lpips(
     if net not in VALID_NETS:
         raise ValueError(f"net must be one of {VALID_NETS}, got '{net}'")
 
-    from ..io import image as _io_image
     y_true = _io_image.load_image(target).to(DEVICE)
     y_pred = _io_image.load_image(data).to(DEVICE)
     _validate_image_batch(y_true, y_pred)
