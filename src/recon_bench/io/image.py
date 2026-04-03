@@ -8,7 +8,10 @@ from ..utils import image as _utils_image
 from .. import _types
 
 
-def load_image(source: _types.ImageInput | list[_types.ImageInput]) -> torch.Tensor:
+def load_image(
+    source: _types.ImageInput | list[_types.ImageInput],
+    max_size: int | None = None,
+) -> torch.Tensor:
     """
     Load one or more images from any supported source into a normalized tensor.
 
@@ -25,6 +28,10 @@ def load_image(source: _types.ImageInput | list[_types.ImageInput]) -> torch.Ten
         - torch.Tensor : (C,H,W) or (N,C,H,W)
         When a list is provided, each element is loaded individually and
         the results are stacked into a single batch tensor.
+    max_size : int or None
+        If set, downscale so the longest edge is at most ``max_size`` pixels,
+        preserving aspect ratio. Images already smaller are left unchanged.
+        Only applied to path and PIL inputs; tensors and arrays are unchanged.
 
     Returns
     -------
@@ -49,16 +56,16 @@ def load_image(source: _types.ImageInput | list[_types.ImageInput]) -> torch.Ten
     """
     # ─── Handle list: load each item, then stack into a batch ───
     if isinstance(source, list):
-        tensors = [_load_single(s) for s in source]
+        tensors = [_load_single(s, max_size) for s in source]
         # torch.stack creates a new dim=0: [(1,C,H,W), ...] → (N,C,H,W)
         # squeeze the N=1 dim from each before stacking
         tensors = [t.squeeze(0) for t in tensors]
         return torch.stack(tensors, dim=0)
 
-    return _load_single(source)
+    return _load_single(source, max_size)
 
 
-def _load_single(source: _types.ImageInput) -> torch.Tensor:
+def _load_single(source: _types.ImageInput, max_size: int | None = None) -> torch.Tensor:
     """
     Load a single image into a normalized (1, C, H, W) tensor.
 
@@ -81,6 +88,16 @@ def _load_single(source: _types.ImageInput) -> torch.Tensor:
             f"Unsupported ImageInput type: {type(source).__name__}. "
             "Expected pathlib.Path, PIL.Image, np.ndarray, or torch.Tensor."
         )
+
+    # ─── Resize PIL images to max_size on the longest edge ───
+    if max_size is not None and isinstance(source, PIL.Image.Image):
+        w, h = source.size
+        if max(w, h) > max_size:
+            scale = max_size / max(w, h)
+            source = source.resize(
+                (round(w * scale), round(h * scale)),
+                PIL.Image.LANCZOS,
+            )
 
     return _utils_image.to_normalized_tensor(source)
 
