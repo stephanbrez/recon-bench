@@ -1,5 +1,4 @@
 import pathlib
-
 import numpy as np
 import open3d as o3d
 import open3d.t.geometry
@@ -14,17 +13,19 @@ from .. import _types
 
 # Typing
 from typing import Literal
+from typing import Callable
 
 # 📝 NOTE: DEVICE is defined here for GPU-accelerated image metrics (LPIPS).
 # Open3D device is defined in io/geometry.py for geometry operations.
 DEVICE = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-
 
 # ===== Image Metrics =====
 
 def psnr(
     target: _types.ImageInput | list[_types.ImageInput],
     data: _types.ImageInput | list[_types.ImageInput],
+    shard_size: int = 10,
+    max_size: int | None = None,
 ) -> torch.Tensor:
     """
     Calculate the Peak Signal to Noise Ratio (PSNR) for a batch of images.
@@ -38,6 +39,12 @@ def psnr(
     data : ImageInput or list[ImageInput]
         Predicted image(s) to compare against the ground truth.
         Must match the batch size of target.
+    shard_size : int
+        Maximum number of images per shard. Reduce to limit peak GPU memory.
+        Default is 10.
+    max_size : int or None
+        If set, downscale images so the longest edge is at most this many
+        pixels before computing the metric. Default is None (no resize).
 
     Returns
     -------
@@ -49,16 +56,39 @@ def psnr(
     ValueError
         If target and data batch sizes differ.
     """
-    y_true = _io_image.load_image(target)
-    y_pred = _io_image.load_image(data)
+    y_true = _io_image.load_image(target, max_size)
+    y_pred = _io_image.load_image(data, max_size)
     _validate_image_batch(y_true, y_pred)
 
+    return _sharded_calculate(_psnr_calc, y_true=y_true, y_pred=y_pred, shard_size=shard_size)
+
+def _psnr_calc(
+    y_true: torch.Tensor,
+    y_pred: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Internal calculation for Peak Signal to Noise Ratio (PSNR).
+
+    Parameters
+    ----------
+    y_true : torch.Tensor
+        Ground truth image tensor of shape (N, C, H, W).
+    y_pred : torch.Tensor
+        Predicted image tensor of shape (N, C, H, W).
+
+    Returns
+    -------
+    torch.Tensor
+        PSNR scores, shape (N,).
+    """
     return -10 * torch.log10((y_true - y_pred).pow(2).mean(dim=(1, 2, 3)))
 
 
 def ssim(
     target: _types.ImageInput | list[_types.ImageInput],
     data: _types.ImageInput | list[_types.ImageInput],
+    shard_size: int = 10,
+    max_size: int | None = None,
 ) -> torch.Tensor:
     """
     Calculate the Structural Similarity Index (SSIM) for a batch of images.
@@ -67,9 +97,18 @@ def ssim(
     Parameters
     ----------
     target : ImageInput or list[ImageInput]
-        Ground truth image(s).
+        Ground truth image(s). Single item or list of: pathlib.Path,
+        PIL.Image, np.ndarray, or torch.Tensor.
+        Tensor shapes: (N, C, H, W) or (C, H, W).
     data : ImageInput or list[ImageInput]
-        Predicted image(s). Must match the batch size of target.
+        Predicted image(s) to compare against the ground truth.
+        Must match the batch size of target.
+    shard_size : int
+        Maximum number of images per shard. Reduce to limit peak GPU memory.
+        Default is 10.
+    max_size : int or None
+        If set, downscale images so the longest edge is at most this many
+        pixels before computing the metric. Default is None (no resize).
 
     Returns
     -------
@@ -81,9 +120,31 @@ def ssim(
     ValueError
         If target and data batch sizes differ.
     """
-    y_true = _io_image.load_image(target)
-    y_pred = _io_image.load_image(data)
+    y_true = _io_image.load_image(target, max_size)
+    y_pred = _io_image.load_image(data, max_size)
     _validate_image_batch(y_true, y_pred)
+
+    return _sharded_calculate(_ssim_calc, y_true=y_true, y_pred=y_pred, shard_size=shard_size)
+
+def _ssim_calc(
+    y_true: torch.Tensor,
+    y_pred: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Internal calculation for global Structural Similarity Index (SSIM).
+
+    Parameters
+    ----------
+    y_true : torch.Tensor
+        Ground truth image tensor of shape (N, C, H, W).
+    y_pred : torch.Tensor
+        Predicted image tensor of shape (N, C, H, W).
+
+    Returns
+    -------
+    torch.Tensor
+        SSIM scores, shape (N,).
+    """
 
     # L=1.0 after normalization
     C1 = 0.01 ** 2
@@ -106,10 +167,11 @@ def ssim(
         / ((target_mean ** 2 + data_mean ** 2 + C1) * (target_var + data_var + C2))
     )
 
-
 def ssim_windowed(
     target: _types.ImageInput | list[_types.ImageInput],
     data: _types.ImageInput | list[_types.ImageInput],
+    shard_size: int = 10,
+    max_size: int | None = None,
 ) -> torch.Tensor:
     """
     Calculate SSIM using a sliding Gaussian window (torchmetrics implementation).
@@ -118,9 +180,18 @@ def ssim_windowed(
     Parameters
     ----------
     target : ImageInput or list[ImageInput]
-        Ground truth image(s).
+        Ground truth image(s). Single item or list of: pathlib.Path,
+        PIL.Image, np.ndarray, or torch.Tensor.
+        Tensor shapes: (N, C, H, W) or (C, H, W).
     data : ImageInput or list[ImageInput]
-        Predicted image(s). Must match the batch size of target.
+        Predicted image(s) to compare against the ground truth.
+        Must match the batch size of target.
+    shard_size : int
+        Maximum number of images per shard. Reduce to limit peak GPU memory.
+        Default is 10.
+    max_size : int or None
+        If set, downscale images so the longest edge is at most this many
+        pixels before computing the metric. Default is None (no resize).
 
     Returns
     -------
@@ -132,18 +203,49 @@ def ssim_windowed(
     ValueError
         If target and data batch sizes differ.
     """
-    y_true = _io_image.load_image(target)
-    y_pred = _io_image.load_image(data)
+    y_true = _io_image.load_image(target, max_size)
+    y_pred = _io_image.load_image(data, max_size)
     _validate_image_batch(y_true, y_pred)
 
     metric = torchmetrics.image.StructuralSimilarityIndexMeasure(reduction="none")
-    return metric(y_pred, y_true)
 
+    return _sharded_calculate(_ssim_windowed_calc,
+        y_pred=y_pred,
+        y_true=y_true,
+        shard_size=shard_size,
+        metric=metric,
+    )
+
+def _ssim_windowed_calc(
+    y_true: torch.Tensor,
+    y_pred: torch.Tensor,
+    **kwargs,
+) -> torch.Tensor:
+    """
+    Internal calculation for windowed SSIM using torchmetrics.
+
+    Parameters
+    ----------
+    y_true : torch.Tensor
+        Ground truth image tensor of shape (N, C, H, W).
+    y_pred : torch.Tensor
+        Predicted image tensor of shape (N, C, H, W).
+    **kwargs
+        Additional keyword arguments to pass to the metric, including "metric".
+
+    Returns
+    -------
+    torch.Tensor
+        SSIM scores, shape (N,).
+    """
+    return kwargs["metric"](y_pred, y_true)
 
 def lpips(
     target: _types.ImageInput | list[_types.ImageInput],
     data: _types.ImageInput | list[_types.ImageInput],
     net: Literal["alex", "vgg", "squeeze"] = "alex",
+    shard_size: int = 10,
+    max_size: int | None = None,
 ) -> torch.Tensor:
     """
     Calculate the Learned Perceptual Image Patch Similarity (LPIPS) for a
@@ -152,12 +254,21 @@ def lpips(
     Parameters
     ----------
     target : ImageInput or list[ImageInput]
-        Ground truth image(s).
+        Ground truth image(s). Single item or list of: pathlib.Path,
+        PIL.Image, np.ndarray, or torch.Tensor.
+        Tensor shapes: (N, C, H, W) or (C, H, W).
     data : ImageInput or list[ImageInput]
-        Predicted image(s). Must match the batch size of target.
-    net : {"alex", "vgg", "squeeze"}
+        Predicted image(s) to compare against the ground truth.
+        Must match the batch size of target.
+    net : {"alex", "vgg", "squeeze"}, optional
         Backbone network for feature extraction. "alex" (AlexNet) is the
-        standard choice per the original paper.
+        standard choice per the original paper. Defaults to "alex".
+    shard_size : int
+        Maximum number of images per shard. Reduce to limit peak GPU memory.
+        Default is 10.
+    max_size : int or None
+        If set, downscale images so the longest edge is at most this many
+        pixels before computing the metric. Default is None (no resize).
 
     Returns
     -------
@@ -173,8 +284,8 @@ def lpips(
     if net not in VALID_NETS:
         raise ValueError(f"net must be one of {VALID_NETS}, got '{net}'")
 
-    y_true = _io_image.load_image(target).to(DEVICE)
-    y_pred = _io_image.load_image(data).to(DEVICE)
+    y_true = _io_image.load_image(target, max_size).to(DEVICE)
+    y_pred = _io_image.load_image(data, max_size).to(DEVICE)
     _validate_image_batch(y_true, y_pred)
 
     # LPIPS expects [-1, 1]
@@ -182,14 +293,43 @@ def lpips(
     y_pred = y_pred * 2 - 1
 
     metric = torchmetrics.image.LearnedPerceptualImagePatchSimilarity(
-        net_type=net
+        net_type=net,
     ).to(DEVICE)
+
+    return _sharded_calculate(
+        _lpips_calc,
+        y_true=y_true,
+        y_pred=y_pred,
+        shard_size=shard_size,
+        metric=metric,
+    )
+
+def _lpips_calc(
+    y_true: torch.Tensor,
+    y_pred: torch.Tensor,
+    **kwargs,
+) -> torch.Tensor:
+    """
+    Internal calculation for LPIPS using torchmetrics.
+
+    Parameters
+    ----------
+    y_true : torch.Tensor
+        Ground truth image tensor of shape (N, C, H, W).
+    y_pred : torch.Tensor
+        Predicted image tensor of shape (N, C, H, W).
+    **kwargs
+        Additional keyword arguments to pass to the metric, including "metric".
+
+    Returns
+    -------
+    torch.Tensor
+        LPIPS scores, shape (N,).
+    """
     return torch.stack([
-        metric(p.unsqueeze(0), t.unsqueeze(0))
+        kwargs["metric"](p.unsqueeze(0), t.unsqueeze(0))
         for p, t in zip(y_pred.unbind(0), y_true.unbind(0))
     ])
-
-
 # ===== Geometry Metrics =====
 
 def chamfer_distance(
@@ -333,3 +473,44 @@ def _validate_image_batch(
             f"Batch size mismatch: target has {target.shape[0]} image(s), "
             f"data has {data.shape[0]} image(s)."
         )
+
+def _sharded_calculate(
+    calc_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+    y_true: torch.Tensor,
+    y_pred: torch.Tensor,
+    shard_size: int = 10,
+    **kwargs,
+) -> torch.Tensor:
+    """
+    Apply a calculation function in shards to manage memory.
+
+    Parameters
+    ----------
+    calc_fn : Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
+        The metric calculation function to apply to each shard.
+    y_true : torch.Tensor
+        Ground truth tensor.
+    y_pred : torch.Tensor
+        Predicted tensor.
+    shard_size : int
+        Maximum number of samples per shard.
+    **kwargs
+        Additional keyword arguments to pass to `calc_fn`.
+
+    Returns
+    -------
+    torch.Tensor
+        The concatenated results of `calc_fn` across all shards.
+    """
+
+    if shard_size <= y_true.size(0):
+        shards = []
+        for shard_true, shard_pred in zip(
+            torch.split(y_true, shard_size, dim=0),
+            torch.split(y_pred, shard_size, dim=0),
+        ):
+            shards.append(calc_fn(shard_true, shard_pred, **kwargs))
+        results = torch.cat(shards, dim=0)
+    else:
+        results = calc_fn(y_true, y_pred, **kwargs)
+    return results

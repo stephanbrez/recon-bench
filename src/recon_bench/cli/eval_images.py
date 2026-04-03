@@ -64,6 +64,17 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         help="Match target/prediction pairs by filename stem instead "
              "of sorted position. Unmatched files are skipped.",
     )
+    parser.add_argument(
+        "-S", "--shard-size", type=int, default=10, metavar="N",
+        help="Max images per shard for metric computation (default: 10). "
+             "Reduce if running out of GPU memory.",
+    )
+    parser.add_argument(
+        "-r", "--resize", type=int, default=None, metavar="N",
+        help="Downscale images so the longest edge is at most N pixels before "
+             "computing metrics. Images smaller than N are unchanged. "
+             "Useful for reducing VRAM usage with high-resolution inputs.",
+    )
     parser.set_defaults(func=run)
 
 
@@ -138,6 +149,8 @@ def run(args: argparse.Namespace) -> None:
         predictions,
         image_metrics=args.metrics,
         profile=args.profile,
+        shard_size=args.shard_size,
+        max_size=args.resize,
     )
 
     # ─── Display results ───

@@ -35,6 +35,8 @@ def evaluate(
     geometry_type: _types.GeometryType = _types.GeometryType.MESH,
     num_points: int = 10000,
     profile: bool = False,
+    shard_size: int = 10,
+    max_size: int | None = None,
 ) -> _types.EvalResult:
     """
     Evaluate reconstruction quality between a target and a prediction.
@@ -80,6 +82,12 @@ def evaluate(
         If True, collect wall-clock timing and GPU memory usage for each
         evaluation step. Results are attached to ``EvalResult.profile``.
         Default False.
+    shard_size : int
+        Maximum number of images per shard for image metric computation.
+        Reduce to limit peak GPU memory. Default is 10.
+    max_size : int or None
+        If set, downscale images so the longest edge is at most this many
+        pixels before computing image metrics. Default is None (no resize).
 
     Returns
     -------
@@ -141,16 +149,16 @@ def evaluate(
 
     if mode == "image_vs_image":
         result = _eval_image_vs_image(
-            target, prediction, image_metrics, timer, mem,
+            target, prediction, image_metrics, shard_size, max_size, timer, mem,
         )
     elif mode == "image_vs_mesh":
         result = _eval_image_vs_mesh(
-            target, prediction, cameras, image_metrics, timer, mem,
+            target, prediction, cameras, image_metrics, shard_size, max_size, timer, mem,
         )
     elif mode == "mesh_vs_mesh":
         result = _eval_mesh_vs_mesh(
             target, prediction, cameras, image_metrics,
-            image_eval, geometry_type, num_points, timer, mem,
+            image_eval, geometry_type, num_points, shard_size, max_size, timer, mem,
         )
     else:
         raise ValueError(
@@ -194,13 +202,15 @@ def _eval_image_vs_image(
     target: _types.ImageInput,
     prediction: _types.ImageInput,
     image_metrics: list[str] | None,
+    shard_size: int,
+    max_size: int | None,
     timer: _timer_mod.Timer | None,
     mem: _memory_mod.MemoryTracker | None,
 ) -> _types.EvalResult:
     """Compare two images directly."""
     with _section("compute_image_metrics", timer, mem):
         scores = _metrics_image.compute_image_metrics(
-            target, prediction, image_metrics,
+            target, prediction, image_metrics, shard_size, max_size,
         )
     return _types.EvalResult(image_metrics=scores)
 
@@ -210,6 +220,8 @@ def _eval_image_vs_mesh(
     prediction: _types.MeshInput,
     cameras: list[_types.Camera] | None,
     image_metrics: list[str] | None,
+    shard_size: int,
+    max_size: int | None,
     timer: _timer_mod.Timer | None,
     mem: _memory_mod.MemoryTracker | None,
 ) -> _types.EvalResult:
@@ -251,7 +263,7 @@ def _eval_image_vs_mesh(
 
     with _section("compute_image_metrics", timer, mem):
         scores = _metrics_image.compute_image_metrics(
-            target_tensor, rendered_stack, image_metrics,
+            target_tensor, rendered_stack, image_metrics, shard_size, max_size,
         )
 
     # ─── Squeeze renders for single-camera backward compat ───
@@ -271,6 +283,8 @@ def _eval_mesh_vs_mesh(
     image_eval: bool,
     geometry_type: _types.GeometryType,
     num_points: int,
+    shard_size: int,
+    max_size: int | None,
     timer: _timer_mod.Timer | None,
     mem: _memory_mod.MemoryTracker | None,
 ) -> _types.EvalResult:
@@ -311,7 +325,7 @@ def _eval_mesh_vs_mesh(
 
         with _section("compute_image_metrics", timer, mem):
             img_scores = _metrics_image.compute_image_metrics(
-                target_stack, pred_stack, image_metrics,
+                target_stack, pred_stack, image_metrics, shard_size, max_size,
             )
 
         result.image_metrics = img_scores

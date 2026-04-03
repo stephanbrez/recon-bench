@@ -19,6 +19,8 @@ def compute_image_metrics(
     target: _types.ImageInput | list[_types.ImageInput],
     data: _types.ImageInput | list[_types.ImageInput],
     metrics: list[str] | None = None,
+    shard_size: int = 10,
+    max_size: int | None = None,
 ) -> dict[str, torch.Tensor]:
     """
     Compute image quality metrics between target and predicted images.
@@ -36,6 +38,12 @@ def compute_image_metrics(
     metrics : list[str] or None
         Names of metrics to compute. None computes all available metrics:
         "psnr", "ssim", "ssim_windowed", "lpips".
+    shard_size : int
+        Maximum number of images per shard passed to each metric. Reduce to
+        limit peak GPU memory. Default is 10.
+    max_size : int or None
+        If set, downscale images so the longest edge is at most this many
+        pixels before computing metrics. Default is None (no resize).
 
     Returns
     -------
@@ -76,6 +84,6 @@ def compute_image_metrics(
     results: dict[str, torch.Tensor] = {}
     for name in metrics:
         fn = _METRIC_REGISTRY[name]
-        results[name] = fn(target, data)
+        results[name] = fn(target, data, shard_size=shard_size, max_size=max_size)
 
     return results
