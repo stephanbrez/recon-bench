@@ -13,6 +13,8 @@ from __future__ import annotations
 import argparse
 
 from . import eval_images
+from . import eval_pcd
+from . import visualize_pcd
 
 
 def main() -> None:
@@ -25,6 +27,8 @@ def main() -> None:
 
     # ─── Register subcommands ───
     eval_images.register(subparsers)
+    eval_pcd.register(subparsers)
+    visualize_pcd.register(subparsers)
 
     args = parser.parse_args()
     if args.command is None:
