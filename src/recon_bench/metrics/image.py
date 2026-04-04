@@ -2,10 +2,11 @@ import torch
 
 from . import core
 from .. import _types
+from typing import Callable
 
 # Registry mapping metric names to their core functions.
 # Add new image metrics here — compute_image_metrics picks them up automatically.
-_METRIC_REGISTRY: dict[str, callable] = {
+_METRIC_REGISTRY: dict[str, Callable] = {
     "psnr": core.psnr,
     "ssim": core.ssim,
     "ssim_windowed": core.ssim_windowed,
