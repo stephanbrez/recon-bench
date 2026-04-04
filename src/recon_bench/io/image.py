@@ -1,6 +1,7 @@
 import pathlib
 
 import numpy as np
+import open3d as o3d
 import PIL.Image
 import torch
 
@@ -103,7 +104,7 @@ def _load_single(source: _types.ImageInput, max_size: int | None = None) -> torc
 
 
 def save_image(
-    image: torch.Tensor | np.ndarray | PIL.Image.Image,
+    image: torch.Tensor | np.ndarray | PIL.Image.Image | o3d.geometry.Image,
     path: pathlib.Path,
 ) -> None:
     """
@@ -111,11 +112,12 @@ def save_image(
 
     Parameters
     ----------
-    image : torch.Tensor or np.ndarray or PIL.Image.Image
+    image : torch.Tensor, np.ndarray, PIL.Image.Image, or o3d.geometry.Image
         Image to save.
         - torch.Tensor : (C, H, W) or (1, C, H, W), values in [0, 1]
         - np.ndarray : (H, W, C), uint8 or float in [0, 1]
         - PIL.Image.Image : saved directly
+        - o3d.geometry.Image : converted via numpy (H, W, 3) uint8
     path : pathlib.Path
         Destination file path. The suffix determines the format
         (e.g. ".png", ".jpg", ".bmp").
@@ -136,10 +138,15 @@ def save_image(
     pil_image.save(path)
 
 
-def _to_pil(image: torch.Tensor | np.ndarray | PIL.Image.Image) -> PIL.Image.Image:
+def _to_pil(
+    image: torch.Tensor | np.ndarray | PIL.Image.Image | o3d.geometry.Image,
+) -> PIL.Image.Image:
     """Convert an image to PIL.Image.Image in uint8 RGB format."""
     if isinstance(image, PIL.Image.Image):
         return image.convert("RGB")
+
+    if isinstance(image, o3d.geometry.Image):
+        image = np.asarray(image)
 
     if isinstance(image, torch.Tensor):
         # ─── Remove batch dim if present ───
