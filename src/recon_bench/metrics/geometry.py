@@ -1,12 +1,17 @@
+from __future__ import annotations
 import torch
 
 from . import core
 from .. import _types
 
+from typing import Callable
+
 # Registry mapping metric names to their core functions.
 # Each function must accept (target, data, **kwargs) and return float | list[float].
-_METRIC_REGISTRY: dict[str, callable] = {
+_METRIC_REGISTRY: dict[str, Callable] = {
     "chamfer_distance": core.chamfer_distance,
+    "hausdorff_distance": core.hausdorff_distance,
+    "fscore": core.fscore,
 }
 
 AVAILABLE_METRICS = tuple(_METRIC_REGISTRY.keys())
@@ -18,6 +23,7 @@ def compute_geometry_metrics(
     metrics: list[str] | None = None,
     mode: _types.GeometryType = _types.GeometryType.MESH,
     num_points: int = 10000,
+    thresholds: list[float] | None = None,
 ) -> dict[str, torch.Tensor]:
     """
     Compute geometry metrics between target and predicted meshes or point clouds.
@@ -34,11 +40,14 @@ def compute_geometry_metrics(
         Predicted geometry/geometries. Must match the batch size of target.
     metrics : list[str] or None
         Names of metrics to compute. None computes all available metrics:
-        "chamfer_distance".
+        "chamfer_distance", "hausdorff_distance", "fscore".
     mode : GeometryType
         Whether inputs are meshes or point clouds.
     num_points : int
         Number of surface sample points for distance computation.
+    thresholds : list[float] or None
+        F-score radii. Only used when "fscore" is in the requested metrics.
+        Defaults to [0.01] if not provided.
 
     Returns
     -------
@@ -79,10 +88,11 @@ def compute_geometry_metrics(
     results: dict[str, torch.Tensor] = {}
     for name in metrics:
         fn = _METRIC_REGISTRY[name]
-        score = fn(target, data, mode=mode, num_points=num_points)
+        score = fn(target, data, mode=mode, num_points=num_points, thresholds=thresholds)
         if isinstance(score, list):
             results[name] = torch.tensor(score)
         else:
             results[name] = torch.tensor([score])
 
     return results
+

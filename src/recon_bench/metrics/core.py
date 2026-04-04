@@ -337,6 +337,7 @@ def chamfer_distance(
     data: _types.MeshInput | list[_types.MeshInput],
     mode: _types.GeometryType = _types.GeometryType.MESH,
     num_points: int = 10000,
+    **kwargs,
 ) -> float | list[float]:
     """
     Calculate chamfer distance between meshes or point clouds.
@@ -445,6 +446,253 @@ def _chamfer_dist_pointclouds(
         params,
     )
     return float(result[0].cpu().numpy())
+
+
+def hausdorff_distance(
+    target: _types.MeshInput | list[_types.MeshInput],
+    data: _types.MeshInput | list[_types.MeshInput],
+    mode: _types.GeometryType = _types.GeometryType.MESH,
+    num_points: int = 10000,
+    **kwargs,
+) -> float | list[float]:
+    """
+    Calculate Hausdorff distance between meshes or point clouds.
+
+    Accepts single items or lists for batched evaluation.
+
+    Parameters
+    ----------
+    target : MeshInput or list[MeshInput]
+        Ground truth geometry/geometries.
+    data : MeshInput or list[MeshInput]
+        Predicted geometry/geometries. Must match the batch size of target.
+    mode : GeometryType
+        Whether inputs are meshes or point clouds.
+    num_points : int
+        Number of points sampled from each surface for distance computation.
+
+    Returns
+    -------
+    float or list[float]
+        Hausdorff distance per pair.
+
+    Raises
+    ------
+    ValueError
+        If target and data batch sizes differ.
+    """
+    target_batch, was_single = batch.ensure_batch(target)
+    data_batch, _ = batch.ensure_batch(data)
+    batch.validate_batch_pair(target_batch, data_batch)
+
+    load_fn = (
+        geometry.load_mesh
+        if mode == _types.GeometryType.MESH
+        else geometry.load_point_cloud
+    )
+    dist_fn = (
+        _hausdorff_dist_meshes
+        if mode == _types.GeometryType.MESH
+        else _hausdorff_dist_pointclouds
+    )
+
+    distances = [
+        dist_fn(load_fn(t), load_fn(d), num_points)
+        for t, d in zip(target_batch, data_batch)
+    ]
+
+    return batch.unbatch(distances, was_single)
+
+
+def _hausdorff_dist_meshes(
+    mesh1: o3d.t.geometry.TriangleMesh,
+    mesh2: o3d.t.geometry.TriangleMesh,
+    num_points: int = 10000,
+) -> float:
+    """
+    Compute Hausdorff distance between two Open3D triangle meshes.
+
+    Parameters
+    ----------
+    mesh1 : o3d.t.geometry.TriangleMesh
+    mesh2 : o3d.t.geometry.TriangleMesh
+    num_points : int
+        Surface sample count for distance computation.
+
+    Returns
+    -------
+    float
+    """
+    params = o3d.t.geometry.MetricParameters(n_sampled_points=num_points)
+    result = mesh1.compute_metrics(
+        mesh2,
+        (o3d.t.geometry.Metric.HausdorffDistance,),
+        params,
+    )
+    return float(result[0].cpu().numpy())
+
+
+def _hausdorff_dist_pointclouds(
+    pcd1: o3d.t.geometry.PointCloud,
+    pcd2: o3d.t.geometry.PointCloud,
+    num_points: int = 10000,
+) -> float:
+    """
+    Compute Hausdorff distance between two Open3D point clouds.
+
+    Parameters
+    ----------
+    pcd1 : o3d.t.geometry.PointCloud
+    pcd2 : o3d.t.geometry.PointCloud
+    num_points : int
+        Sample count for distance computation.
+
+    Returns
+    -------
+    float
+    """
+    params = o3d.t.geometry.MetricParameters(n_sampled_points=num_points)
+    result = pcd1.compute_metrics(
+        pcd2,
+        (o3d.t.geometry.Metric.HausdorffDistance,),
+        params,
+    )
+    return float(result[0].cpu().numpy())
+
+
+def fscore(
+    target: _types.MeshInput | list[_types.MeshInput],
+    data: _types.MeshInput | list[_types.MeshInput],
+    mode: _types.GeometryType = _types.GeometryType.MESH,
+    num_points: int = 10000,
+    thresholds: list[float] | None = None,
+    **kwargs,
+) -> list[float] | list[list[float]]:
+    """
+    Calculate F-score between meshes or point clouds at given thresholds.
+
+    Accepts single items or lists for batched evaluation. Returns one F-score
+    per threshold per pair.
+
+    Parameters
+    ----------
+    target : MeshInput or list[MeshInput]
+        Ground truth geometry/geometries.
+    data : MeshInput or list[MeshInput]
+        Predicted geometry/geometries. Must match the batch size of target.
+    mode : GeometryType
+        Whether inputs are meshes or point clouds.
+    num_points : int
+        Number of points sampled from each surface for distance computation.
+    thresholds : list[float] or None
+        F-score radii. Defaults to [0.01] if not provided.
+
+    Returns
+    -------
+    list[float] or list[list[float]]
+        F-scores per threshold for each pair. Returns a single list of floats
+        (one per threshold) when both inputs are single items, a list of lists
+        when both are lists.
+
+    Raises
+    ------
+    ValueError
+        If target and data batch sizes differ.
+    """
+    if thresholds is None:
+        thresholds = [0.01]
+
+    target_batch, was_single = batch.ensure_batch(target)
+    data_batch, _ = batch.ensure_batch(data)
+    batch.validate_batch_pair(target_batch, data_batch)
+
+    load_fn = (
+        geometry.load_mesh
+        if mode == _types.GeometryType.MESH
+        else geometry.load_point_cloud
+    )
+    score_fn = (
+        _fscore_meshes
+        if mode == _types.GeometryType.MESH
+        else _fscore_pointclouds
+    )
+
+    scores = [
+        score_fn(load_fn(t), load_fn(d), num_points, thresholds)
+        for t, d in zip(target_batch, data_batch)
+    ]
+
+    return batch.unbatch(scores, was_single)
+
+
+def _fscore_meshes(
+    mesh1: o3d.t.geometry.TriangleMesh,
+    mesh2: o3d.t.geometry.TriangleMesh,
+    num_points: int,
+    thresholds: list[float],
+) -> list[float]:
+    """
+    Compute F-score between two Open3D triangle meshes.
+
+    Parameters
+    ----------
+    mesh1 : o3d.t.geometry.TriangleMesh
+    mesh2 : o3d.t.geometry.TriangleMesh
+    num_points : int
+        Surface sample count for distance computation.
+    thresholds : list[float]
+        F-score radii.
+
+    Returns
+    -------
+    list[float]
+        One F-score per threshold.
+    """
+    params = o3d.t.geometry.MetricParameters(
+        n_sampled_points=num_points,
+        fscore_radius=o3d.utility.DoubleVector(thresholds),
+    )
+    result = mesh1.compute_metrics(
+        mesh2,
+        (o3d.t.geometry.Metric.FScore,),
+        params,
+    )
+    return [float(x) for x in result.cpu().numpy()]
+
+
+def _fscore_pointclouds(
+    pcd1: o3d.t.geometry.PointCloud,
+    pcd2: o3d.t.geometry.PointCloud,
+    num_points: int,
+    thresholds: list[float],
+) -> list[float]:
+    """
+    Compute F-score between two Open3D point clouds.
+
+    Parameters
+    ----------
+    pcd1 : o3d.t.geometry.PointCloud
+    pcd2 : o3d.t.geometry.PointCloud
+    num_points : int
+        Sample count for distance computation.
+    thresholds : list[float]
+        F-score radii.
+
+    Returns
+    -------
+    list[float]
+        One F-score per threshold.
+    """
+    params = o3d.t.geometry.MetricParameters(
+        n_sampled_points=num_points,
+        fscore_radius=o3d.utility.DoubleVector(thresholds),
+    )
+    result = pcd1.compute_metrics(
+        pcd2,
+        (o3d.t.geometry.Metric.FScore,),
+        params,
+    )
+    return [float(x) for x in result.cpu().numpy()]
 
 
 # ===== Internal Helpers =====

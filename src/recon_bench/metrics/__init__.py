@@ -11,3 +11,5 @@ ssim = core.ssim
 ssim_windowed = core.ssim_windowed
 lpips = core.lpips
 chamfer_distance = core.chamfer_distance
+hausdorff_distance = core.hausdorff_distance
+fscore = core.fscore
