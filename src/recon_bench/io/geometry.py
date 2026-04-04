@@ -13,16 +13,19 @@ _DEVICE = o3d.core.Device(
 )
 
 
-def load_mesh(source: "_types.GeometryArrays | pathlib.Path") -> o3d.t.geometry.TriangleMesh:
+def load_mesh(
+    source: "_types.GeometryArrays | pathlib.Path | o3d.t.geometry.TriangleMesh",
+) -> o3d.t.geometry.TriangleMesh:
     """
-    Load a triangle mesh from a file path or in-memory arrays.
+    Load a triangle mesh from a file path, in-memory arrays, or pass through.
 
     Parameters
     ----------
-    source : pathlib.Path or GeometryArrays
+    source : pathlib.Path, GeometryArrays, or o3d.t.geometry.TriangleMesh
         - pathlib.Path : file path to a mesh (e.g. .obj, .ply, .glb).
           Format is inferred from the suffix by Open3D.
         - GeometryArrays dict : must contain "verts" (V, 3) and "faces" (F, 3).
+        - o3d.t.geometry.TriangleMesh : returned as-is (pass-through).
 
     Returns
     -------
@@ -41,7 +44,12 @@ def load_mesh(source: "_types.GeometryArrays | pathlib.Path") -> o3d.t.geometry.
     >>> mesh = load_mesh(pathlib.Path("model.obj"))
     >>> mesh = load_mesh({"verts": verts_array, "faces": faces_array})
     """
+    if isinstance(source, o3d.t.geometry.TriangleMesh):
+        return source
+
     if isinstance(source, pathlib.Path):
+        if not source.exists():
+            raise FileNotFoundError(f"No such file: '{source}'")
         return o3d.t.io.read_triangle_mesh(str(source))
 
     if isinstance(source, dict):
@@ -54,9 +62,9 @@ def load_mesh(source: "_types.GeometryArrays | pathlib.Path") -> o3d.t.geometry.
         mesh.triangle.indices = _to_o3d_tensor(source["faces"], o3d.core.int32)
         return mesh
 
-    raise TypeError(
+    raise TypeError( # type: ignore
         f"Unsupported mesh source type: {type(source).__name__}. "
-        "Expected pathlib.Path or GeometryArrays dict."
+        "Expected pathlib.Path, GeometryArrays dict, or TriangleMesh."
     )
 
 
@@ -81,17 +89,20 @@ def save_mesh(mesh: o3d.t.geometry.TriangleMesh, path: pathlib.Path) -> None:
     o3d.t.io.write_triangle_mesh(str(path), mesh)
 
 
-def load_point_cloud(source: "_types.GeometryArrays | pathlib.Path") -> o3d.t.geometry.PointCloud:
+def load_point_cloud(
+    source: "_types.GeometryArrays | pathlib.Path | o3d.t.geometry.PointCloud",
+) -> o3d.t.geometry.PointCloud:
     """
-    Load a point cloud from a file path or in-memory arrays.
+    Load a point cloud from a file path, in-memory arrays, or pass through.
 
     Parameters
     ----------
-    source : pathlib.Path or GeometryArrays
+    source : pathlib.Path, GeometryArrays, or o3d.t.geometry.PointCloud
         - pathlib.Path : file path to a point cloud (e.g. .ply, .pcd, .xyz).
           Format is inferred from the suffix by Open3D.
         - GeometryArrays dict : must contain "verts" (N, 3) with point positions.
           The "faces" key is ignored if present.
+        - o3d.t.geometry.PointCloud : returned as-is (pass-through).
 
     Returns
     -------
@@ -108,21 +119,77 @@ def load_point_cloud(source: "_types.GeometryArrays | pathlib.Path") -> o3d.t.ge
     >>> pcd = load_point_cloud(pathlib.Path("scan.ply"))
     >>> pcd = load_point_cloud({"verts": points_array})
     """
+    if isinstance(source, o3d.t.geometry.PointCloud):
+        return source
+
     if isinstance(source, pathlib.Path):
-        return o3d.t.io.read_point_cloud(str(source))
+        if not source.exists():
+            raise FileNotFoundError(f"No such file: '{source}'")
+        pcd = o3d.t.io.read_point_cloud(
+            str(source),
+            remove_nan_points=True,
+            remove_infinite_points=True,
+        )
+        if pcd.is_empty():
+            raise ValueError(f"Loaded empty point cloud: {source}")
+        return pcd
 
     if isinstance(source, dict):
         pcd = o3d.t.geometry.PointCloud(_DEVICE)
         pcd.point.positions = _to_o3d_tensor(source["verts"], o3d.core.float32)
         return pcd
 
-    raise TypeError(
+    raise TypeError( # type: ignore
+        f"Unsupported point cloud source type: {type(source).__name__}. "
+        "Expected pathlib.Path, GeometryArrays dict, or PointCloud."
+    )
+
+def load_legacy_point_cloud(source: pathlib.Path) -> o3d.geometry.PointCloud:
+    """
+    Load a legacy point cloud from a file path.
+
+    Parameters
+    ----------
+    source : pathlib.Path
+        File path to a point cloud (e.g. .ply, .pcd, .xyz).
+        Format is inferred from the suffix by Open3D.
+
+    Returns
+    -------
+    o3d.geometry.PointCloud
+        Legacy Open3D point cloud.
+
+    Raises
+    ------
+    TypeError
+        If source is not a supported type.
+
+    Examples
+    --------
+    >>> pcd = load_legacy_point_cloud(pathlib.Path("scan.ply"))
+    """
+    if isinstance(source, pathlib.Path):
+        if not source.exists():
+            raise FileNotFoundError(f"No such file: '{source}'")
+        pcd = o3d.io.read_point_cloud(
+            source,
+            remove_nan_points=True,
+            remove_infinite_points=True,
+        )
+        if len(pcd.points) == 0:
+            raise ValueError(f"Loaded empty point cloud: {source}")
+        return pcd
+
+    raise TypeError( # type: ignore
         f"Unsupported point cloud source type: {type(source).__name__}. "
         "Expected pathlib.Path or GeometryArrays dict."
     )
 
 
-def save_point_cloud(pcd: o3d.t.geometry.PointCloud, path: pathlib.Path) -> None:
+def save_point_cloud(
+    pcd: o3d.t.geometry.PointCloud,
+    path: pathlib.Path,
+) -> None:
     """
     Save a point cloud to disk. Format inferred from the file suffix.
 
