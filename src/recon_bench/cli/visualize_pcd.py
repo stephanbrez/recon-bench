@@ -161,6 +161,7 @@ def run(args: argparse.Namespace) -> None:
     import open3d.visualization.rendering
 
     from ..io import geometry
+    from ..io import image
 
     cloud_specs = _parse_cloud_specs(args.clouds)
     background = _parse_color(args.background)
@@ -234,8 +235,5 @@ def run(args: argparse.Namespace) -> None:
 
     # ─── Render and save ───
     o3d_image = renderer.render_to_image()
-
-    output_path = args.output
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    o3d.io.write_image(str(output_path), o3d_image)
-    print(f"Saved: {output_path} ({args.width}x{args.height})")
+    image.save_image(o3d_image, args.output)
+    print(f"Saved: {args.output} ({args.width}x{args.height})")
