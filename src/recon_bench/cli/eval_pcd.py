@@ -185,7 +185,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
 def run(args: argparse.Namespace) -> None:
     """Execute the ``eval-pcd`` subcommand."""
     from .. import _types
-    from ..io import export
+    from ..io import tabular
     from ..io import geometry
     from ..metrics import geometry as metrics_geometry
     from ..utils import pointcloud
@@ -307,9 +307,9 @@ def run(args: argparse.Namespace) -> None:
     data = [dataclasses.asdict(r) for r in rows]
 
     if args.write_csv:
-        export.write_to_csv(args.write_csv, data)
+        tabular.write_to_csv(args.write_csv, data)
         print(f"\nWrote CSV: {args.write_csv}")
 
     if args.write_json:
-        export.write_to_json(args.write_json, data)
+        tabular.write_to_json(args.write_json, data)
         print(f"Wrote JSON: {args.write_json}")
