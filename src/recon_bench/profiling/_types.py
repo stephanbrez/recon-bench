@@ -1,8 +1,7 @@
 """
-ProfileResult and supporting dataclasses for timing and memory reports.
+Profiling dataclasses for timing and memory reports.
 
-Collects hierarchical timing and GPU memory measurements into a structured
-report with a human-readable tree summary.
+Defines the structured types returned by the profiling subsystem.
 """
 from __future__ import annotations
 
@@ -73,20 +72,72 @@ class ProfileResult:
 
     def summary(self) -> str:
         """
-        Return a human-readable tree report of timing and memory usage.
+        Return a compact table of total time and peak memory per top-level
+        section.
+
+        Returns
+        -------
+        str
+            Multi-line formatted string.
+        """
+        sections: list[str] = []
+
+        # ─── Timing table ───
+        if self.timing:
+            n = len(self.timing)
+            total_s = sum(e.duration_s for e in self.timing)
+            mean_s = total_s / n
+            headers = ["Section", "Time (s)"]
+            rows = [
+                [e.name, f"{e.duration_s:.4f}"]
+                for e in self.timing
+            ]
+            rows.append(None)
+            rows.append(["Mean", f"{mean_s:.4f}"])
+            rows.append(["Total", f"{total_s:.4f}"])
+            sections.append("⏱  Timing")
+            sections.append(_fmt.format_table(headers, rows))
+
+        # ─── Memory table ───
+        if self.cuda_available and self.memory:
+            n = len(self.memory)
+            mean_peak = sum(e.peak_mb for e in self.memory) / n
+            mean_delta = sum(e.delta_mb for e in self.memory) / n
+            headers = ["Section", "Peak (MiB)", "Delta (MiB)"]
+            rows = [
+                [e.name, f"{e.peak_mb:.1f}", f"{e.delta_mb:+.1f}"]
+                for e in self.memory
+            ]
+            rows.append(None)
+            rows.append(["Mean", f"{mean_peak:.1f}", f"{mean_delta:+.1f}"])
+            sections.append("")
+            sections.append("🔋 GPU Memory")
+            sections.append(_fmt.format_table(headers, rows))
+        elif not self.cuda_available:
+            sections.append("")
+            sections.append("🔋 GPU Memory (CUDA not available)")
+
+        return "\n".join(sections)
+
+    def detail(self) -> str:
+        """
+        Return a human-readable tree report of timing and memory usage,
+        including all nested sub-sections.
 
         Returns
         -------
         str
             Multi-line string formatted as an indented tree.
         """
+        from . import _format
+
         lines: list[str] = []
 
         # ─── Timing tree ───
         lines.append("⏱  Timing")
         for i, entry in enumerate(self.timing):
             is_last = i == len(self.timing) - 1
-            _format_timing(entry, lines, prefix="", is_last=is_last)
+            _format.format_timing(entry, lines, prefix="", is_last=is_last)
 
         # ─── Memory tree ───
         lines.append("")
@@ -94,49 +145,8 @@ class ProfileResult:
             lines.append("🔋 GPU Memory")
             for i, entry in enumerate(self.memory):
                 is_last = i == len(self.memory) - 1
-                _format_memory(entry, lines, prefix="", is_last=is_last)
+                _format.format_memory(entry, lines, prefix="", is_last=is_last)
         else:
             lines.append("🔋 GPU Memory (CUDA not available)")
 
         return "\n".join(lines)
-
-
-# ===== Formatting Helpers =====
-
-
-def _format_timing(
-    entry: TimingEntry,
-    lines: list[str],
-    prefix: str,
-    is_last: bool,
-) -> None:
-    """Recursively format a TimingEntry with tree decorations."""
-    label = f"{entry.name}: {entry.duration_s:.4f}s"
-    _fmt.format_tree_node(label, lines, prefix, is_last)
-    new_prefix = _fmt.child_prefix(prefix, is_last)
-    for i, child in enumerate(entry.children):
-        _format_timing(
-            child, lines, new_prefix,
-            is_last=(i == len(entry.children) - 1),
-        )
-
-
-def _format_memory(
-    entry: MemoryEntry,
-    lines: list[str],
-    prefix: str,
-    is_last: bool,
-) -> None:
-    """Recursively format a MemoryEntry with tree decorations."""
-    label = (
-        f"{entry.name}: "
-        f"peak {entry.peak_mb:.1f} MiB, "
-        f"delta {entry.delta_mb:+.1f} MiB"
-    )
-    _fmt.format_tree_node(label, lines, prefix, is_last)
-    new_prefix = _fmt.child_prefix(prefix, is_last)
-    for i, child in enumerate(entry.children):
-        _format_memory(
-            child, lines, new_prefix,
-            is_last=(i == len(entry.children) - 1),
-        )

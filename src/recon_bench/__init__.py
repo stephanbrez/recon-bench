@@ -21,7 +21,7 @@ Evaluate reconstruction quality with a single call:
 """
 from . import evaluate as _evaluate_module
 from . import _types
-from .profiling import profile as _profile_mod
+from .profiling import _types as _profile_mod
 from .profiling import timer as _timer_mod
 from .profiling import memory as _memory_mod
 

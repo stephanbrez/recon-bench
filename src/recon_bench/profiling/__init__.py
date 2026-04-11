@@ -9,7 +9,7 @@ ProfileResult   Aggregated profiling report (timing + memory).
 TimingEntry     Single timing measurement node.
 MemoryEntry     Single memory measurement node.
 """
-from .profile import ProfileResult, TimingEntry, MemoryEntry
+from ._types import ProfileResult, TimingEntry, MemoryEntry
 from .timer import Timer
 from .memory import MemoryTracker
 

@@ -12,7 +12,7 @@ import time
 
 import torch
 
-from . import profile as _profile
+from . import _types as _profile
 
 
 class Timer:

@@ -11,7 +11,7 @@ import contextlib
 
 import torch
 
-from . import profile as _profile
+from . import _types as _profile
 
 _BYTES_PER_MIB = 1024 * 1024
 

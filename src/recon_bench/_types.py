@@ -14,7 +14,7 @@ import torch
 from typing import TypedDict, NotRequired
 
 if typing.TYPE_CHECKING:
-    from .profiling import profile as _profile_mod
+    from .profiling import _types as _profile_mod
 
     ProfileResult = _profile_mod.ProfileResult
 else:

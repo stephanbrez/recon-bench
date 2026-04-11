@@ -12,7 +12,7 @@ from .metrics import geometry as _metrics_geometry
 from .rendering import renderer as _renderer
 from .profiling import timer as _timer_mod
 from .profiling import memory as _memory_mod
-from .profiling import profile as _profile_mod
+from .profiling import _types as _profile_mod
 from . import _types
 
 # Typing
