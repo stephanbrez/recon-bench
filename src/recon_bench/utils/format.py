@@ -11,7 +11,7 @@ from __future__ import annotations
 
 def format_table(
     headers: list[str],
-    rows: list[list[str]],
+    rows: list[list[str] | None],
     alignment: list[str] | None = None,
 ) -> str:
     """
@@ -41,6 +41,8 @@ def format_table(
     # ─── Compute column widths ───
     widths = [len(h) for h in headers]
     for row in rows:
+        if row is None:
+            continue
         for i, cell in enumerate(row):
             widths[i] = max(widths[i], len(cell))
 
@@ -57,8 +59,12 @@ def format_table(
     separator_parts = ["─" * w for w in widths]
     lines.append("──┼──".join(separator_parts))
 
+    separator = "──┼──".join(separator_parts)
     for row in rows:
-        lines.append(_fmt_row(row))
+        if row is None:
+            lines.append(separator)
+        else:
+            lines.append(_fmt_row(row))
 
     return "\n".join(lines)
 
