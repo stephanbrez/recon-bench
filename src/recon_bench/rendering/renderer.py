@@ -137,7 +137,9 @@ def render_mesh(
     Returns
     -------
     torch.Tensor
-        Rendered image, shape (3, H, W), dtype float32, values in [0, 1].
+        Rendered image, shape (4, H, W), dtype float32, values in [0, 1].
+        Channels are RGBA; alpha is 1.0 where the mesh was hit and 0.0
+        on background pixels (derived from the depth buffer).
         H and W match camera.height and camera.width.
 
     Raises
@@ -190,11 +192,15 @@ def render_mesh(
 
     # ─── Step 6: Set up camera ───
     intrinsics, extrinsics  = camera.camera_to_o3d_pinhole(cam)
-    renderer.setup_camera(intrinsics, extrinsics, cam.width, cam.height)
+    renderer.setup_camera(intrinsics, extrinsics)
 
-    # ─── Step 7: Render ───
-    o3d_image = renderer.render_to_image()  # returns o3d.geometry.Image
-    array = np.asarray(o3d_image)           # shape (H, W, 3), dtype uint8
+    # ─── Step 7: Render color + depth ───
+    o3d_image = renderer.render_to_image()                     # (H, W, 3) uint8
+    o3d_depth = renderer.render_to_depth_image()               # (H, W) float32, [0, 1]
 
-    # Convert to expected format
-    return torch.from_numpy(array).permute(2, 0, 1).float() / 255.0
+    rgb = torch.from_numpy(np.asarray(o3d_image)).permute(2, 0, 1).float() / 255.0
+    # Normalized depth = 1.0 where no geometry was hit (far plane).
+    depth = torch.from_numpy(np.asarray(o3d_depth))
+    alpha = (depth < 1.0).float().unsqueeze(0)
+
+    return torch.cat([rgb, alpha], dim=0)
