@@ -9,6 +9,7 @@ import typing
 import numpy as np
 import PIL.Image
 import torch
+import torchvision
 
 # Typing
 from typing import TypedDict, NotRequired
@@ -123,6 +124,31 @@ class Camera:
         kwargs = {k: tuple(v) if isinstance(v, list) else v
                   for k, v in d.items() if k in fields}
         return Camera(**kwargs)
+
+    @staticmethod
+    def from_extrinsics(R: np.ndarray | torch.Tensor, t: np.ndarray | torch.Tensor, **kwargs) -> "Camera":
+        """
+        Construct a Camera from an extrinsics matrix.
+
+        Parameters
+        ----------
+        R : np.ndarray | torch.Tensor
+            3x3 rotation matrix.
+        t : np.ndarray | torch.Tensor
+            3x1 translation vector.
+
+        Returns
+        -------
+        Camera
+            Constructed camera instance.
+        """
+        if isinstance(R, torch.Tensor):
+            R = R.cpu().numpy()
+        if isinstance(t, torch.Tensor):
+            t = t.cpu().numpy()
+        position = -R.T @ t
+        look_at = position + R.T @ np.array([0.0, 0.0, 1.0])
+        return Camera(position=tuple(position), look_at=tuple(look_at), **kwargs)
 
     @staticmethod
     def orbit(
@@ -253,6 +279,23 @@ class EvalResult:
     geometry_metrics: dict[str, torch.Tensor] | None = None
     rendered_images: dict[str, torch.Tensor] | None = None
     profile: ProfileResult | None = None
+
+    def save_renders(self, output_dir: pathlib.Path) -> None:
+        """
+        Save rendered images to disk as PNG files.
+
+        Parameters
+        ----------
+        output_dir : pathlib.Path
+            Directory where images will be written. Files are named
+            ``{role}_{index}.png``.
+        """
+        if self.rendered_images is None:
+            return
+        for role, images in self.rendered_images.items():
+            for i, image in enumerate(images):
+                image_path = output_dir / f"{role}_{i}.png"
+                torchvision.utils.save_image(image, image_path)
 
     def summary(self) -> str:
         """
