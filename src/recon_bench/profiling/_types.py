@@ -50,7 +50,6 @@ class MemoryEntry:
     delta_mb: float
     children: list[MemoryEntry] = dataclasses.field(default_factory=list)
 
-
 @dataclasses.dataclass(slots=True)
 class ProfileResult:
     """
