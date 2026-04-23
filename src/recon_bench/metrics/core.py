@@ -56,8 +56,8 @@ def psnr(
     ValueError
         If target and data batch sizes differ.
     """
-    y_true = _io_image.load_image(target, max_size)
-    y_pred = _io_image.load_image(data, max_size)
+    y_true = _to_rgb(_io_image.load_image(target, max_size))
+    y_pred = _to_rgb(_io_image.load_image(data, max_size))
     _validate_image_batch(y_true, y_pred)
 
     return _sharded_calculate(_psnr_calc, y_true=y_true, y_pred=y_pred, shard_size=shard_size)
@@ -120,8 +120,8 @@ def ssim(
     ValueError
         If target and data batch sizes differ.
     """
-    y_true = _io_image.load_image(target, max_size)
-    y_pred = _io_image.load_image(data, max_size)
+    y_true = _to_rgb(_io_image.load_image(target, max_size))
+    y_pred = _to_rgb(_io_image.load_image(data, max_size))
     _validate_image_batch(y_true, y_pred)
 
     return _sharded_calculate(_ssim_calc, y_true=y_true, y_pred=y_pred, shard_size=shard_size)
@@ -203,8 +203,8 @@ def ssim_windowed(
     ValueError
         If target and data batch sizes differ.
     """
-    y_true = _io_image.load_image(target, max_size)
-    y_pred = _io_image.load_image(data, max_size)
+    y_true = _to_rgb(_io_image.load_image(target, max_size))
+    y_pred = _to_rgb(_io_image.load_image(data, max_size))
     _validate_image_batch(y_true, y_pred)
 
     metric = torchmetrics.image.StructuralSimilarityIndexMeasure(reduction="none")
@@ -284,8 +284,8 @@ def lpips(
     if net not in VALID_NETS:
         raise ValueError(f"net must be one of {VALID_NETS}, got '{net}'")
 
-    y_true = _io_image.load_image(target, max_size).to(DEVICE)
-    y_pred = _io_image.load_image(data, max_size).to(DEVICE)
+    y_true = _to_rgb(_io_image.load_image(target, max_size)).to(DEVICE)
+    y_pred = _to_rgb(_io_image.load_image(data, max_size)).to(DEVICE)
     _validate_image_batch(y_true, y_pred)
 
     # LPIPS expects [-1, 1]
@@ -721,6 +721,29 @@ def _validate_image_batch(
             f"Batch size mismatch: target has {target.shape[0]} image(s), "
             f"data has {data.shape[0]} image(s)."
         )
+
+
+def _to_rgb(image: torch.Tensor) -> torch.Tensor:
+    """
+    Drop the alpha channel from an image batch, returning RGB only.
+
+    Perceptual metrics (PSNR/SSIM/LPIPS) are defined on RGB. Mixing alpha
+    into them conflates pixel fidelity with mask fidelity. Inputs with 1
+    or 3 channels are returned unchanged; 4-channel inputs are sliced.
+
+    Parameters
+    ----------
+    image : torch.Tensor
+        Shape (N, C, H, W).
+
+    Returns
+    -------
+    torch.Tensor
+        Shape (N, min(C, 3), H, W).
+    """
+    if image.shape[1] == 4:
+        return image[:, :3]
+    return image
 
 def _sharded_calculate(
     calc_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
