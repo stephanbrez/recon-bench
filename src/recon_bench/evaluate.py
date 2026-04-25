@@ -196,6 +196,42 @@ def _section(
         yield
 
 
+# ===== Target Info =====
+
+def _extract_target_info(
+    target: _types.ImageInput | list[_types.ImageInput],
+    max_size: int | None,
+    timer: _timer_mod.Timer | None,
+    mem: _memory_mod.MemoryTracker | None,
+) -> tuple[list[pathlib.Path] | None, torch.Tensor | None]:
+    """
+    Capture target identity for the result object.
+
+    Returns ``(target_paths, target_images)``. Exactly one is non-None
+    for image inputs; both are None for mesh inputs. Paths are preserved
+    only when every element is a ``pathlib.Path``; otherwise the target
+    is loaded into a tensor (respecting ``max_size``) so the user can
+    recover what was evaluated via ``EvalResult.save_targets()``.
+    """
+    if isinstance(target, pathlib.Path):
+        return [target], None
+
+    if isinstance(target, list) and target and all(
+        isinstance(t, pathlib.Path) for t in target
+    ):
+        return list(target), None
+
+    if isinstance(target, (torch.Tensor, np.ndarray, PIL.Image.Image)) or (
+        isinstance(target, list)
+        and all(isinstance(t, (torch.Tensor, np.ndarray, PIL.Image.Image, pathlib.Path))
+                for t in target)
+    ):
+        with _section("load_target", timer, mem):
+            return None, _io_image.load_image(target, max_size=max_size)
+
+    return None, None
+
+
 # ===== Mode Handlers =====
 
 def _eval_image_vs_image(
@@ -208,11 +244,18 @@ def _eval_image_vs_image(
     mem: _memory_mod.MemoryTracker | None,
 ) -> _types.EvalResult:
     """Compare two images directly."""
+    target_paths, target_images = _extract_target_info(target, max_size, timer, mem)
+    metric_target = target_images if target_images is not None else target
+
     with _section("compute_image_metrics", timer, mem):
         scores = _metrics_image.compute_image_metrics(
-            target, prediction, image_metrics, shard_size, max_size,
+            metric_target, prediction, image_metrics, shard_size, max_size,
         )
-    return _types.EvalResult(image_metrics=scores)
+    return _types.EvalResult(
+        image_metrics=scores,
+        target_paths=target_paths,
+        target_images=target_images,
+    )
 
 
 def _eval_image_vs_mesh(
@@ -256,10 +299,10 @@ def _eval_image_vs_mesh(
             renders.append(_renderer.render_mesh(mesh, cam))
     rendered_stack = torch.stack(renders)  # (N, C, H, W)
 
-    with _section("load_target", timer, mem):
-        target_tensor = _io_image.load_image(
-            target if len(cameras) > 1 else target,
-        )
+    target_paths, target_tensor = _extract_target_info(target, max_size, timer, mem)
+    if target_tensor is None:
+        with _section("load_target", timer, mem):
+            target_tensor = _io_image.load_image(target, max_size=max_size)
 
     with _section("compute_image_metrics", timer, mem):
         scores = _metrics_image.compute_image_metrics(
@@ -269,9 +312,14 @@ def _eval_image_vs_mesh(
     # ─── Squeeze renders for single-camera backward compat ───
     rendered_out = renders[0] if len(cameras) == 1 else rendered_stack
 
+    # Only surface target_images when inputs were in-memory data.
+    target_images = target_tensor if target_paths is None else None
+
     return _types.EvalResult(
         image_metrics=scores,
         rendered_images={"prediction": rendered_out},
+        target_paths=target_paths,
+        target_images=target_images,
     )
 
 

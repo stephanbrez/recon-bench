@@ -56,8 +56,8 @@ def psnr(
     ValueError
         If target and data batch sizes differ.
     """
-    y_true = _to_rgb(_io_image.load_image(target, max_size))
-    y_pred = _to_rgb(_io_image.load_image(data, max_size))
+    y_true = _to_rgb(_io_image.load_image(target, max_size)).to(DEVICE)
+    y_pred = _to_rgb(_io_image.load_image(data, max_size)).to(DEVICE)
     _validate_image_batch(y_true, y_pred)
 
     return _sharded_calculate(_psnr_calc, y_true=y_true, y_pred=y_pred, shard_size=shard_size)
@@ -120,8 +120,8 @@ def ssim(
     ValueError
         If target and data batch sizes differ.
     """
-    y_true = _to_rgb(_io_image.load_image(target, max_size))
-    y_pred = _to_rgb(_io_image.load_image(data, max_size))
+    y_true = _to_rgb(_io_image.load_image(target, max_size)).to(DEVICE)
+    y_pred = _to_rgb(_io_image.load_image(data, max_size)).to(DEVICE)
     _validate_image_batch(y_true, y_pred)
 
     return _sharded_calculate(_ssim_calc, y_true=y_true, y_pred=y_pred, shard_size=shard_size)
@@ -203,11 +203,11 @@ def ssim_windowed(
     ValueError
         If target and data batch sizes differ.
     """
-    y_true = _to_rgb(_io_image.load_image(target, max_size))
-    y_pred = _to_rgb(_io_image.load_image(data, max_size))
+    y_true = _to_rgb(_io_image.load_image(target, max_size)).to(DEVICE)
+    y_pred = _to_rgb(_io_image.load_image(data, max_size)).to(DEVICE)
     _validate_image_batch(y_true, y_pred)
 
-    metric = torchmetrics.image.StructuralSimilarityIndexMeasure(reduction="none")
+    metric = torchmetrics.image.StructuralSimilarityIndexMeasure(reduction="none").to(DEVICE)
 
     return _sharded_calculate(_ssim_windowed_calc,
         y_pred=y_pred,

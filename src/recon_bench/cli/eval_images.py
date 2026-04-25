@@ -139,8 +139,6 @@ def run(args: argparse.Namespace) -> None:
         print("Error: no image pairs to evaluate")
         sys.exit(1)
 
-    filenames = [p.stem for p in targets]
-
     print(f"Evaluating {len(targets)} image pairs ...\n")
 
     # ─── Run evaluation ───
@@ -156,7 +154,7 @@ def run(args: argparse.Namespace) -> None:
     # ─── Display results ───
     print(result.summary())
     if not args.summary_only:
-        detail = result.detail(filenames=filenames)
+        detail = result.detail()
         if detail:
             print()
             print(detail)

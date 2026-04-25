@@ -9,7 +9,6 @@ import typing
 import numpy as np
 import PIL.Image
 import torch
-import torchvision
 
 # Typing
 from typing import TypedDict, NotRequired
@@ -271,6 +270,16 @@ class EvalResult:
         "target" and/or "prediction". Shape (C, H, W) for single view,
         (N, C, H, W) for multi-view. Values in [0, 1]. None if no
         rendering was performed.
+    target_paths : list[pathlib.Path] or None
+        Filesystem paths of the target images, when evaluate() was called
+        with Path inputs. Used by ``detail()`` to label per-item rows.
+        None when targets were passed as in-memory data or when the target
+        was a mesh.
+    target_images : torch.Tensor or None
+        Loaded target images of shape ``(N, C, H, W)`` with values in
+        [0, 1], populated when evaluate() was called with in-memory data
+        (tensor/array/PIL) rather than paths. Use ``save_targets()`` to
+        write them to disk. None when targets were paths or meshes.
     profile : ProfileResult or None
         Timing and GPU memory profiling data. Populated only when
         ``evaluate(..., profile=True)`` is used. None otherwise.
@@ -278,6 +287,8 @@ class EvalResult:
     image_metrics: dict[str, torch.Tensor] | None = None
     geometry_metrics: dict[str, torch.Tensor] | None = None
     rendered_images: dict[str, torch.Tensor] | None = None
+    target_paths: list[pathlib.Path] | None = None
+    target_images: torch.Tensor | None = None
     profile: ProfileResult | None = None
 
     def save_renders(self, output_dir: pathlib.Path) -> None:
@@ -290,12 +301,33 @@ class EvalResult:
             Directory where images will be written. Files are named
             ``{role}_{index}.png``.
         """
+        from .io import image as _io_image
+
         if self.rendered_images is None:
             return
         for role, images in self.rendered_images.items():
             for i, image in enumerate(images):
-                image_path = output_dir / f"{role}_{i}.png"
-                torchvision.utils.save_image(image, image_path)
+                _io_image.save_image(image, output_dir / f"{role}_{i}.png")
+
+    def save_targets(self, output_dir: pathlib.Path) -> None:
+        """
+        Save in-memory target images to disk as PNG files.
+
+        Only applies when ``target_images`` is populated (i.e. evaluate()
+        was called with in-memory image data). Files are named
+        ``target_{index}.png``, mirroring ``save_renders()``.
+
+        Parameters
+        ----------
+        output_dir : pathlib.Path
+            Directory where images will be written.
+        """
+        from .io import image as _io_image
+
+        if self.target_images is None:
+            return
+        for i, image in enumerate(self.target_images):
+            _io_image.save_image(image, output_dir / f"target_{i}.png")
 
     def summary(self) -> str:
         """
@@ -342,14 +374,16 @@ class EvalResult:
         Return a per-item breakdown table.
 
         Shows one table per metric group with a row for every evaluated
-        item. When *filenames* is provided the table uses those labels;
-        otherwise items are numbered.
+        item. Row labels are chosen in this order:
+        1. *filenames* argument, if provided.
+        2. ``self.target_paths``, if populated (targets were Paths).
+        3. Numeric indices ``[0], [1], ...`` as a fallback.
 
         Parameters
         ----------
         filenames : list[str] or None
-            Optional labels for each item (e.g. source file stems). Must
-            match the number of items in the metric tensors.
+            Optional override labels for each item. Must match the number
+            of items in the metric tensors.
 
         Returns
         -------
@@ -379,8 +413,10 @@ class EvalResult:
             labels: list[str]
             if filenames is not None:
                 labels = filenames
+            elif self.target_paths is not None:
+                labels = [str(p) for p in self.target_paths]
             else:
-                labels = [str(i) for i in range(n_items)]
+                labels = [f"[{i}]" for i in range(n_items)]
 
             rows: list[list[str]] = []
             for idx, label in enumerate(labels):
