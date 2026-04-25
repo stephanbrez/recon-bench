@@ -55,6 +55,37 @@ psnr    │  32.4000
 ssim    │  0.9100
 ```
 
+### Per-Item Breakdown
+
+`result.detail()` returns a per-item table. When targets were passed as
+`Path` inputs, rows are labeled with those paths automatically; otherwise
+items are numbered `[0], [1], ...`. Pass `filenames=...` to override.
+
+```python
+result = recon_bench.evaluate(
+    [Path("gt/a.png"), Path("gt/b.png")],
+    [Path("pr/a.png"), Path("pr/b.png")],
+)
+print(result.detail())  # rows labeled with target paths
+```
+
+### Recovering Targets
+
+When targets come in as in-memory data (tensor / ndarray / PIL), the
+loaded images are stashed on the result so you can save what was actually
+evaluated:
+
+```python
+result = recon_bench.evaluate(target_tensor, pred_tensor)
+result.target_images           # tensor (N, C, H, W), values in [0, 1]
+result.save_targets("out/")    # writes target_0.png, target_1.png, ...
+```
+
+For Path inputs, `result.target_paths` holds the originals; `save_targets()`
+is a no-op. Renders (when produced) are written by
+`result.save_renders("out/")` as `prediction_{i}.png` /
+`target_{i}.png` — same naming scheme.
+
 ## Evaluation Modes
 
 The evaluation mode is inferred automatically from input types, or set
@@ -288,12 +319,12 @@ ssim_windowed   │   0.8834
 lpips           │   0.0521
 
 📊 Image Metrics (per item)
-Item    │    psnr  │    ssim  │  ssim_windowed  │   lpips
+Item              │    psnr  │    ssim  │  ssim_windowed  │   lpips
 ──┼──────────┼──────────┼──────────────────┼─────────
-img_00  │  32.410  │  0.9210  │         0.9050  │  0.0410
-img_01  │  28.130  │  0.8750  │         0.8520  │  0.0680
-img_02  │  31.200  │  0.9150  │         0.8980  │  0.0440
-img_03  │  29.118  │  0.8940  │         0.8785  │  0.0554
+data/gt/img_00.png  │  32.410  │  0.9210  │         0.9050  │  0.0410
+data/gt/img_01.png  │  28.130  │  0.8750  │         0.8520  │  0.0680
+data/gt/img_02.png  │  31.200  │  0.9150  │         0.8980  │  0.0440
+data/gt/img_03.png  │  29.118  │  0.8940  │         0.8785  │  0.0554
 ```
 
 ### `rb eval-pcd`
