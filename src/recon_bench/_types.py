@@ -127,7 +127,8 @@ class Camera:
     @staticmethod
     def from_extrinsics(R: np.ndarray | torch.Tensor, t: np.ndarray | torch.Tensor, **kwargs) -> "Camera":
         """
-        Construct a Camera from an extrinsics matrix.
+        Construct a Camera from an extrinsics matrix in CV standard W2C:
+            X-right, Y-down, Z-forward.
 
         Parameters
         ----------
@@ -146,8 +147,17 @@ class Camera:
         if isinstance(t, torch.Tensor):
             t = t.cpu().numpy()
         position = -R.T @ t
-        look_at = position + R.T @ np.array([0.0, 0.0, 1.0])
-        return Camera(position=tuple(position), look_at=tuple(look_at), **kwargs)
+
+        up = R.T @ np.array([0.0, 1.0, 0.0])
+        forward = R.T @ np.array([0.0, 0.0, 1.0])
+
+        look_at = position + forward
+
+        return Camera(
+            position=tuple(position),
+            look_at=tuple(look_at),
+            up=tuple(up),
+            **kwargs)
 
     @staticmethod
     def orbit(
