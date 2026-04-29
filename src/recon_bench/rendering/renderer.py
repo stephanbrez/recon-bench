@@ -190,9 +190,10 @@ def render_mesh(
 
     # ─── Step 6: Set up camera ───
     intrinsics, extrinsics  = camera.camera_to_o3d_pinhole(cam)
+    # print(f"Intrinsics: {intrinsics}, Extrinsics: {extrinsics}")
     renderer.setup_camera(intrinsics, extrinsics)
 
     # ─── Step 7: Render ───
     o3d_image = renderer.render_to_image()  # (H, W, 3) uint8
-    o3d_image = np.ascontiguousarray(np.flipud(np.asarray(o3d_image)))
+    o3d_image = np.asarray(o3d_image)
     return torch.from_numpy(o3d_image).permute(2, 0, 1).float() / 255.0
