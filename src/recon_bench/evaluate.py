@@ -37,6 +37,7 @@ def evaluate(
     profile: bool = False,
     shard_size: int = 10,
     max_size: int | None = None,
+    background_color: tuple[float, float, float] = (1.0, 1.0, 1.0),
 ) -> _types.EvalResult:
     """
     Evaluate reconstruction quality between a target and a prediction.
@@ -88,6 +89,9 @@ def evaluate(
     max_size : int or None
         If set, downscale images so the longest edge is at most this many
         pixels before computing image metrics. Default is None (no resize).
+    background_color : tuple[float, float, float]
+        RGB background color used when rendering meshes, each component in
+        [0, 1]. Applies to "image_vs_mesh" mode. Default white (1.0, 1.0, 1.0).
 
     Returns
     -------
@@ -154,6 +158,7 @@ def evaluate(
     elif mode == "image_vs_mesh":
         result = _eval_image_vs_mesh(
             target, prediction, cameras, image_metrics, shard_size, max_size, timer, mem,
+            background_color,
         )
     elif mode == "mesh_vs_mesh":
         result = _eval_mesh_vs_mesh(
@@ -267,8 +272,15 @@ def _eval_image_vs_mesh(
     max_size: int | None,
     timer: _timer_mod.Timer | None,
     mem: _memory_mod.MemoryTracker | None,
+    background_color: tuple[float, float, float] = (1.0, 1.0, 1.0),
 ) -> _types.EvalResult:
-    """Render prediction mesh from each camera, compare to target image(s)."""
+    """Render prediction mesh from each camera, compare to target image(s).
+
+    Parameters
+    ----------
+    background_color : tuple[float, float, float]
+        RGB background color passed to the renderer, each component in [0, 1].
+    """
     if cameras is None:
         raise ValueError(
             "camera is required for 'image_vs_mesh' evaluation. "
@@ -296,7 +308,7 @@ def _eval_image_vs_mesh(
     renders: list[torch.Tensor] = []
     with _section("render_prediction", timer, mem):
         for cam in cameras:
-            renders.append(_renderer.render_mesh(mesh, cam))
+            renders.append(_renderer.render_mesh(mesh, cam, background_color))
     rendered_stack = torch.stack(renders)  # (N, C, H, W)
 
     target_paths, target_tensor = _extract_target_info(target, max_size, timer, mem)
