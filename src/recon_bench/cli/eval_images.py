@@ -16,9 +16,7 @@ import argparse
 import pathlib
 import sys
 
-_IMAGE_SUFFIXES = {
-    ".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".webp",
-}
+from recon_bench._types import IMAGE_SUFFIXES as _IMAGE_SUFFIXES
 
 
 def _collect_images(directory: pathlib.Path) -> list[pathlib.Path]:

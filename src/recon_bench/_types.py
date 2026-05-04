@@ -23,6 +23,9 @@ else:
 
 # ===== Input Types =====
 
+IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".webp", ".exr"})
+MESH_SUFFIXES = frozenset({".obj", ".ply", ".glb", ".gltf", ".off", ".stl", ".fbx"})
+
 # Single image: tensor (C,H,W) or (N,C,H,W), numpy array, PIL image, or file path.
 # Lists of these are accepted by all public functions for batched evaluation.
 ImageInput = torch.Tensor | np.ndarray | PIL.Image.Image | pathlib.Path
@@ -277,9 +280,9 @@ class EvalResult:
         was performed.
     rendered_images : dict[str, torch.Tensor] or None
         Rendered images produced during evaluation, keyed by role:
-        "target" and/or "prediction". Shape (C, H, W) for single view,
-        (N, C, H, W) for multi-view. Values in [0, 1]. None if no
-        rendering was performed.
+        "target" and/or "prediction". Shape (N, C, H, W) where N is
+        the number of views. Values in [0, 1]. None if no rendering
+        was performed.
     target_paths : list[pathlib.Path] or None
         Filesystem paths of the target images, when evaluate() was called
         with Path inputs. Used by ``detail()`` to label per-item rows.

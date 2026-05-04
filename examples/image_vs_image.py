@@ -14,9 +14,7 @@ import pathlib
 
 import recon_bench
 
-_IMAGE_SUFFIXES = {
-    ".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".webp",
-}
+from recon_bench._types import IMAGE_SUFFIXES as _IMAGE_SUFFIXES
 
 # ─── Configure paths ───
 TARGET_DIR = pathlib.Path("data/gt")

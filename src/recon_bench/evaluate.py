@@ -21,8 +21,8 @@ from typing import Literal
 EvalMode = Literal["image_vs_image", "image_vs_mesh", "mesh_vs_mesh"]
 
 # File suffixes used for mode inference from pathlib.Path inputs.
-_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif", ".webp", ".exr"}
-_MESH_SUFFIXES = {".obj", ".ply", ".glb", ".gltf", ".off", ".stl", ".fbx"}
+_IMAGE_SUFFIXES = _types.IMAGE_SUFFIXES
+_MESH_SUFFIXES = _types.MESH_SUFFIXES
 
 
 def evaluate(
@@ -164,6 +164,7 @@ def evaluate(
         result = _eval_mesh_vs_mesh(
             target, prediction, cameras, image_metrics,
             image_eval, geometry_type, num_points, shard_size, max_size, timer, mem,
+            background_color,
         )
     else:
         raise ValueError(
@@ -404,15 +405,12 @@ def _eval_image_vs_mesh(
             target_tensor, rendered_stack, image_metrics, shard_size, max_size,
         )
 
-    # ─── Squeeze renders for single-camera backward compat ───
-    rendered_out = renders[0] if len(cameras) == 1 else rendered_stack
-
     # Only surface target_images when inputs were in-memory data.
     target_images = target_tensor if target_paths is None else None
 
     return _types.EvalResult(
         image_metrics=scores,
-        rendered_images={"prediction": rendered_out},
+        rendered_images={"prediction": rendered_stack},
         target_paths=target_paths,
         target_images=target_images,
     )
@@ -428,6 +426,7 @@ def _eval_mesh_vs_mesh(
     max_size: int | None,
     timer: _timer_mod.Timer | None,
     mem: _memory_mod.MemoryTracker | None,
+    background_color: tuple[float, float, float] = (1.0, 1.0, 1.0),
 ) -> _types.EvalResult:
     """
     Evaluate quality between two geometry objects.
@@ -460,6 +459,8 @@ def _eval_mesh_vs_mesh(
         Optional timer for profiling.
     mem : MemoryTracker or None
         Optional memory tracker for profiling.
+    background_color : tuple[float, float, float]
+        RGB background color passed to the renderer, each component in [0, 1].
 
     Returns
     -------
@@ -492,11 +493,11 @@ def _eval_mesh_vs_mesh(
 
         with _section("render_target", timer, mem):
             for cam in cameras:
-                target_renders.append(_renderer.render_mesh(target_mesh, cam))
+                target_renders.append(_renderer.render_mesh(target_mesh, cam, background_color))
 
         with _section("render_prediction", timer, mem):
             for cam in cameras:
-                pred_renders.append(_renderer.render_mesh(pred_mesh, cam))
+                pred_renders.append(_renderer.render_mesh(pred_mesh, cam, background_color))
 
         target_stack = torch.stack(target_renders)  # (N, C, H, W)
         pred_stack = torch.stack(pred_renders)      # (N, C, H, W)
@@ -508,17 +509,10 @@ def _eval_mesh_vs_mesh(
 
         result.image_metrics = img_scores
 
-        # ─── Squeeze for single-camera backward compat ───
-        if len(cameras) == 1:
-            result.rendered_images = {
-                "target": target_renders[0],
-                "prediction": pred_renders[0],
-            }
-        else:
-            result.rendered_images = {
-                "target": target_stack,
-                "prediction": pred_stack,
-            }
+        result.rendered_images = {
+            "target": target_stack,
+            "prediction": pred_stack,
+        }
 
     return result
 
@@ -602,11 +596,17 @@ def _is_image(value: _types.ImageInput | _types.MeshInput) -> bool:
             "Specify mode explicitly if using a non-standard extension."
         )
 
-    # ─── Lists: classify from the first element ───
+    # ─── Lists: classify from all elements ───
     if isinstance(value, list):
         if not value:
             raise ValueError("Cannot infer mode from an empty list.")
-        return _is_image(value[0])
+        classifications = {_is_image(item) for item in value}
+        if len(classifications) > 1:
+            raise TypeError(
+                "Mixed input types in list: contains both image-like and "
+                "geometry-like elements. Specify mode explicitly."
+            )
+        return classifications.pop()
 
     raise TypeError(
         f"Unrecognized input type: {type(value).__name__}. "
