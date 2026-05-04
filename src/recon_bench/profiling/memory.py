@@ -82,17 +82,17 @@ class MemoryTracker:
 
         if self._cuda_available:
             torch.cuda.synchronize()
-            torch.cuda.reset_peak_memory_stats()
             mem_before = torch.cuda.memory_allocated()
+            peak_before = torch.cuda.max_memory_allocated()
 
         try:
             yield
         finally:
             if self._cuda_available:
                 torch.cuda.synchronize()
-                peak = torch.cuda.max_memory_allocated()
+                peak_after = torch.cuda.max_memory_allocated()
                 mem_after = torch.cuda.memory_allocated()
-                entry.peak_mb = peak / _BYTES_PER_MIB
+                entry.peak_mb = (peak_after - peak_before) / _BYTES_PER_MIB
                 entry.delta_mb = (mem_after - mem_before) / _BYTES_PER_MIB
 
             self._stack.pop()
