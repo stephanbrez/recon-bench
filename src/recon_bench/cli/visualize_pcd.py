@@ -13,6 +13,8 @@ import argparse
 import pathlib
 import sys
 
+import numpy as np
+
 
 # ===== Constants =====
 
@@ -98,6 +100,45 @@ def _parse_cloud_specs(
     return result
 
 
+def _camera_distance_for_bounds(
+    corners: np.ndarray,
+    center: np.ndarray,
+    view_dir: np.ndarray,
+    up: np.ndarray,
+    aspect: float,
+    vertical_fov_degrees: float,
+    padding: float,
+) -> float:
+    """Return camera distance needed to fit bounds in the view frustum."""
+    right = np.cross(up, view_dir)
+    right_norm = np.linalg.norm(right)
+    if right_norm == 0:
+        raise ValueError("Camera up vector is parallel to view direction.")
+    right /= right_norm
+    camera_up = np.cross(view_dir, right)
+    camera_up /= np.linalg.norm(camera_up)
+
+    rel = corners - center
+    half_vertical_fov = np.radians(vertical_fov_degrees) / 2.0
+    tan_y = np.tan(half_vertical_fov)
+    tan_x = aspect * tan_y
+
+    depth = rel @ view_dir
+    horizontal = np.abs(rel @ right) / tan_x
+    vertical = np.abs(rel @ camera_up) / tan_y
+    return float(np.max(depth + np.maximum(horizontal, vertical)) * padding)
+
+
+def _bounds_corners(bounds_min: np.ndarray, bounds_max: np.ndarray) -> np.ndarray:
+    """Build the eight corners of an axis-aligned bounding box."""
+    return np.array([
+        [x, y, z]
+        for x in (bounds_min[0], bounds_max[0])
+        for y in (bounds_min[1], bounds_max[1])
+        for z in (bounds_min[2], bounds_max[2])
+    ])
+
+
 # ===== CLI Registration =====
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -143,6 +184,18 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         help="Camera azimuth angle in degrees (default: 45.0).",
     )
     parser.add_argument(
+        "--frame-percentile", type=float, default=99.9,
+        help=(
+            "Upper percentile used for camera framing; the lower bound is "
+            "100 minus this value. Use 100 to frame the full bounds "
+            "(default: 99.9)."
+        ),
+    )
+    parser.add_argument(
+        "--padding", type=float, default=1.15,
+        help="Camera framing padding multiplier (default: 1.15).",
+    )
+    parser.add_argument(
         "--background", default="1,1,1",
         help=(
             "Background color as '#RRGGBB' or 'R,G,B' "
@@ -156,7 +209,6 @@ def register(subparsers: argparse._SubParsersAction) -> None:
 
 def run(args: argparse.Namespace) -> None:
     """Execute the ``visualize-pcd`` subcommand."""
-    import numpy as np
     import open3d as o3d
     import open3d.visualization.rendering
 
@@ -165,6 +217,10 @@ def run(args: argparse.Namespace) -> None:
 
     cloud_specs = _parse_cloud_specs(args.clouds)
     background = _parse_color(args.background)
+    if not 50.0 < args.frame_percentile <= 100.0:
+        raise ValueError("--frame-percentile must be greater than 50 and at most 100.")
+    if args.padding <= 0:
+        raise ValueError("--padding must be positive.")
 
     # ─── Load and color point clouds ───
     legacy_clouds: list[o3d.geometry.PointCloud] = []
@@ -192,9 +248,17 @@ def run(args: argparse.Namespace) -> None:
     all_points = np.concatenate(
         [np.asarray(pcd.points) for pcd in legacy_clouds], axis=0,
     )
-    center = all_points.mean(axis=0)
-    extent = all_points.max(axis=0) - all_points.min(axis=0)
-    diagonal = float(np.linalg.norm(extent))
+    if args.frame_percentile == 100.0:
+        bounds_min = all_points.min(axis=0)
+        bounds_max = all_points.max(axis=0)
+    else:
+        bounds_min = np.percentile(
+            all_points,
+            100.0 - args.frame_percentile,
+            axis=0,
+        )
+        bounds_max = np.percentile(all_points, args.frame_percentile, axis=0)
+    center = (bounds_min + bounds_max) / 2.0
 
     # ─── Set up offscreen renderer ───
     renderer = o3d.visualization.rendering.OffscreenRenderer(
@@ -211,26 +275,33 @@ def run(args: argparse.Namespace) -> None:
     renderer.scene.set_background(list(background) + [1.0])
 
     # ─── Position camera to see all clouds ───
-    # Place camera at 1.5x the scene diagonal, looking at the center,
-    # slightly elevated for a 3/4 view.
-    distance = diagonal * 1.5
+    # Frame robust bounds by default so a few outlier points do not make
+    # the main reconstruction occupy only a tiny part of the image.
     elevation = np.radians(args.elevation)
     azimuth = np.radians(args.azimuth)
-    cam_pos = center + distance * np.array([
+    view_dir = np.array([
         np.cos(elevation) * np.sin(azimuth),
         np.sin(elevation),
         np.cos(elevation) * np.cos(azimuth),
     ])
+    view_dir /= np.linalg.norm(view_dir)
+    up = np.array([0.0, 1.0, 0.0])
+    distance = _camera_distance_for_bounds(
+        _bounds_corners(bounds_min, bounds_max),
+        center,
+        view_dir,
+        up,
+        args.width / args.height,
+        60.0,
+        args.padding,
+    )
+    cam_pos = center + distance * view_dir
 
     renderer.setup_camera(
         60.0,
-        o3d.geometry.AxisAlignedBoundingBox(
-            all_points.min(axis=0), all_points.max(axis=0),
-        ),
-        center,
-    )
-    renderer.scene.camera.look_at(
-        center.tolist(), cam_pos.tolist(), [0, 1, 0],
+        center.tolist(),
+        cam_pos.tolist(),
+        up.tolist(),
     )
 
     # ─── Render and save ───
