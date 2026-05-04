@@ -125,10 +125,10 @@ def load_point_cloud(
     if isinstance(source, pathlib.Path):
         if not source.exists():
             raise FileNotFoundError(f"No such file: '{source}'")
-        pcd = o3d.t.io.read_point_cloud(
-            str(source),
-            remove_nan_points=True,
-            remove_infinite_points=True,
+        pcd = o3d.t.io.read_point_cloud(str(source))
+        pcd, _ = pcd.remove_non_finite_points(
+            remove_nan=True,
+            remove_infinite=True,
         )
         if pcd.is_empty():
             raise ValueError(f"Loaded empty point cloud: {source}")
