@@ -89,7 +89,26 @@ def compute_geometry_metrics(
     for name in metrics:
         fn = _METRIC_REGISTRY[name]
         score = fn(target, data, mode=mode, num_points=num_points, thresholds=thresholds)
-        if isinstance(score, list):
+        if name == "fscore":
+            resolved_thresholds = thresholds if thresholds is not None else [0.01]
+            resolved_thresholds_len = len(resolved_thresholds)
+            if resolved_thresholds_len == 1:
+                if isinstance(score, float):
+                    results[name] = torch.tensor([score])
+                elif isinstance(score, list) and not isinstance(score[0], list):
+                    results[name] = torch.tensor(score)
+                else:
+                    values = [pair[0] for pair in score]
+                    results[name] = torch.tensor(values)
+            else:
+                if isinstance(score, list) and not isinstance(score[0], list):
+                    for t, s in zip(resolved_thresholds, score):
+                        results[f"fscore_{t}"] = torch.tensor([s])
+                else:
+                    for i, t in enumerate(resolved_thresholds):
+                        values = [pair[i] for pair in score]
+                        results[f"fscore_{t}"] = torch.tensor(values)
+        elif isinstance(score, list):
             results[name] = torch.tensor(score)
         else:
             results[name] = torch.tensor([score])

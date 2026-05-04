@@ -19,6 +19,27 @@ from typing import Callable
 # Open3D device is defined in io/geometry.py for geometry operations.
 DEVICE = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
+_LPIPS_VALID_NETS = ("alex", "vgg", "squeeze")
+_LPIPS_MODELS: dict[str, torchmetrics.image.LearnedPerceptualImagePatchSimilarity] = {}
+_SSIM_WINDOWED_MODEL: torchmetrics.image.StructuralSimilarityIndexMeasure | None = None
+
+
+def _get_lpips_model(net: str) -> torchmetrics.image.LearnedPerceptualImagePatchSimilarity:
+    if net not in _LPIPS_MODELS:
+        _LPIPS_MODELS[net] = torchmetrics.image.LearnedPerceptualImagePatchSimilarity(
+            net_type=net,
+        ).to(DEVICE)
+    return _LPIPS_MODELS[net]
+
+
+def _get_ssim_windowed_model() -> torchmetrics.image.StructuralSimilarityIndexMeasure:
+    global _SSIM_WINDOWED_MODEL
+    if _SSIM_WINDOWED_MODEL is None:
+        _SSIM_WINDOWED_MODEL = torchmetrics.image.StructuralSimilarityIndexMeasure(
+            reduction="none",
+        ).to(DEVICE)
+    return _SSIM_WINDOWED_MODEL
+
 # ===== Image Metrics =====
 
 def psnr(
@@ -81,7 +102,8 @@ def _psnr_calc(
     torch.Tensor
         PSNR scores, shape (N,).
     """
-    return -10 * torch.log10((y_true - y_pred).pow(2).mean(dim=(1, 2, 3)))
+    mse = (y_true - y_pred).pow(2).mean(dim=(1, 2, 3)).clamp(min=1e-10)
+    return -10 * torch.log10(mse)
 
 
 def ssim(
@@ -207,7 +229,7 @@ def ssim_windowed(
     y_pred = _to_rgb(_io_image.load_image(data, max_size)).to(DEVICE)
     _validate_image_batch(y_true, y_pred)
 
-    metric = torchmetrics.image.StructuralSimilarityIndexMeasure(reduction="none").to(DEVICE)
+    metric = _get_ssim_windowed_model()
 
     return _sharded_calculate(_ssim_windowed_calc,
         y_pred=y_pred,
@@ -280,9 +302,8 @@ def lpips(
     ValueError
         If net is not a valid backbone name, or if batch sizes differ.
     """
-    VALID_NETS = ("alex", "vgg", "squeeze")
-    if net not in VALID_NETS:
-        raise ValueError(f"net must be one of {VALID_NETS}, got '{net}'")
+    if net not in _LPIPS_VALID_NETS:
+        raise ValueError(f"net must be one of {_LPIPS_VALID_NETS}, got '{net}'")
 
     y_true = _to_rgb(_io_image.load_image(target, max_size)).to(DEVICE)
     y_pred = _to_rgb(_io_image.load_image(data, max_size)).to(DEVICE)
@@ -292,9 +313,7 @@ def lpips(
     y_true = y_true * 2 - 1
     y_pred = y_pred * 2 - 1
 
-    metric = torchmetrics.image.LearnedPerceptualImagePatchSimilarity(
-        net_type=net,
-    ).to(DEVICE)
+    metric = _get_lpips_model(net)
 
     return _sharded_calculate(
         _lpips_calc,
