@@ -194,6 +194,19 @@ def _section(
     Wrap a code block in optional timer and memory tracker sections.
 
     When both trackers are None (profiling disabled), this is a no-op.
+
+    Parameters
+    ----------
+    name : str
+        The name of the profiling section.
+    timer : Timer or None
+        Timer object to record timing, or None.
+    mem : MemoryTracker or None
+        Memory tracker object to record usage, or None.
+
+    Yields
+    ------
+    None
     """
     timer_ctx = timer.section(name) if timer else contextlib.nullcontext()
     mem_ctx = mem.section(name) if mem else contextlib.nullcontext()
@@ -217,6 +230,25 @@ def _extract_target_info(
     only when every element is a ``pathlib.Path``; otherwise the target
     is loaded into a tensor (respecting ``max_size``) so the user can
     recover what was evaluated via ``EvalResult.save_targets()``.
+
+    Parameters
+    ----------
+    target : ImageInput or list[ImageInput]
+        The ground truth image or list of images.
+    max_size : int or None
+        If set, downscale images so the longest edge is at most this many
+        pixels before loading.
+    timer : Timer or None
+        Optional timer for profiling.
+    mem : MemoryTracker or None
+        Optional memory tracker for profiling.
+
+    Returns
+    -------
+    target_paths : list[pathlib.Path] or None
+        List of paths to target images, if provided as paths.
+    target_images : torch.Tensor or None
+        The loaded target images as a tensor, if provided as data.
     """
     if isinstance(target, pathlib.Path):
         return [target], None
@@ -248,7 +280,31 @@ def _eval_image_vs_image(
     timer: _timer_mod.Timer | None,
     mem: _memory_mod.MemoryTracker | None,
 ) -> _types.EvalResult:
-    """Compare two images directly."""
+    """
+    Compare two images directly.
+
+    Parameters
+    ----------
+    target : ImageInput
+        The ground truth image.
+    prediction : ImageInput
+        The predicted image.
+    image_metrics : list[str] or None
+        Which image metrics to compute. None means all.
+    shard_size : int
+        Maximum number of images per shard for metric computation.
+    max_size : int or None
+        If set, downscale images before computing metrics.
+    timer : Timer or None
+        Optional timer for profiling.
+    mem : MemoryTracker or None
+        Optional memory tracker for profiling.
+
+    Returns
+    -------
+    EvalResult
+        Container with image metrics.
+    """
     target_paths, target_images = _extract_target_info(target, max_size, timer, mem)
     metric_target = target_images if target_images is not None else target
 
@@ -274,12 +330,39 @@ def _eval_image_vs_mesh(
     mem: _memory_mod.MemoryTracker | None,
     background_color: tuple[float, float, float] = (1.0, 1.0, 1.0),
 ) -> _types.EvalResult:
-    """Render prediction mesh from each camera, compare to target image(s).
+    """
+    Render prediction mesh from each camera, compare to target image(s).
 
     Parameters
     ----------
+    target : ImageInput or list[ImageInput]
+        The ground truth image(s).
+    prediction : MeshInput
+        The predicted mesh.
+    cameras : list[Camera] or None
+        Cameras to use for rendering.
+    image_metrics : list[str] or None
+        Which image metrics to compute. None means all.
+    shard_size : int
+        Maximum number of images per shard for metric computation.
+    max_size : int or None
+        If set, downscale images before computing metrics.
+    timer : Timer or None
+        Optional timer for profiling.
+    mem : MemoryTracker or None
+        Optional memory tracker for profiling.
     background_color : tuple[float, float, float]
         RGB background color passed to the renderer, each component in [0, 1].
+
+    Returns
+    -------
+    EvalResult
+        Container with image metrics and rendered images.
+
+    Raises
+    ------
+    ValueError
+        If camera is missing, or if target count doesn't match camera count.
     """
     if cameras is None:
         raise ValueError(
@@ -333,8 +416,6 @@ def _eval_image_vs_mesh(
         target_paths=target_paths,
         target_images=target_images,
     )
-
-
 def _eval_mesh_vs_mesh(
     target: _types.MeshInput,
     prediction: _types.MeshInput,
@@ -348,7 +429,44 @@ def _eval_mesh_vs_mesh(
     timer: _timer_mod.Timer | None,
     mem: _memory_mod.MemoryTracker | None,
 ) -> _types.EvalResult:
-    """Compute geometry metrics; optionally render both and compute image metrics."""
+    """
+    Evaluate quality between two geometry objects.
+
+    Computes geometric metrics (e.g., chamfer distance) and optionally
+    renders both geometries to compute image-based metrics.
+
+    Parameters
+    ----------
+    target : MeshInput
+        The ground truth geometry.
+    prediction : MeshInput
+        The predicted geometry to evaluate.
+    cameras : list[Camera] or None
+        Cameras to use for rendering. If None and ``image_eval`` is True,
+        defaults to a single orbit camera.
+    image_metrics : list[str] or None
+        List of image metric names to compute.
+    image_eval : bool
+        If True, render both geometries and compute image metrics.
+    geometry_type : GeometryType
+        Whether to treat inputs as meshes or point clouds.
+    num_points : int
+        Number of points to sample on the surface for geometry metrics.
+    shard_size : int
+        Maximum number of images per shard for metric computation.
+    max_size : int or None
+        If set, downscale rendered images to this maximum edge length.
+    timer : Timer or None
+        Optional timer for profiling.
+    mem : MemoryTracker or None
+        Optional memory tracker for profiling.
+
+    Returns
+    -------
+    EvalResult
+        Container with geometry_metrics and (optionally) image_metrics
+        and rendered_images.
+    """
     with _section("compute_geometry_metrics", timer, mem):
         geo_scores = _metrics_geometry.compute_geometry_metrics(
             target, prediction, mode=geometry_type, num_points=num_points,
@@ -403,7 +521,6 @@ def _eval_mesh_vs_mesh(
             }
 
     return result
-
 
 # ===== Mode Inference =====
 
