@@ -4,8 +4,8 @@ import numpy as np
 
 DTYPE_DIVISORS = {
     torch.uint8:  255.0,
-    torch.int16:  65535.0,
-    torch.int32:  65535.0,
+    torch.int16:  32768.0,
+    torch.int32:  2147483648.0,
 }
 
 
