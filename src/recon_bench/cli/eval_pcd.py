@@ -279,10 +279,16 @@ def run(args: argparse.Namespace) -> None:
                 float(scores["hausdorff_distance"].item())
                 if "hausdorff_distance" in scores else None
             )
-            fscores = (
-                scores["fscore"].tolist()
-                if "fscore" in scores else []
-            )
+            if "fscore" in scores:
+                fscores = scores["fscore"].tolist()
+            elif use_fscore:
+                fscores = []
+                for thr in thresholds:
+                    key = f"fscore_{thr}"
+                    if key in scores:
+                        fscores.append(float(scores[key].item()))
+            else:
+                fscores = []
 
             # One row per threshold (fscore varies); chamfer/hausdorff
             # are the same across thresholds so they repeat.
