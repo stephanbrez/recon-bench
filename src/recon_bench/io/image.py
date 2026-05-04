@@ -84,6 +84,9 @@ def _load_single(source: _types.ImageInput, max_size: int | None = None) -> torc
     if isinstance(source, pathlib.Path):
         source = PIL.Image.open(source).convert("RGB")
 
+    if isinstance(source, PIL.Image.Image):
+        source = source.convert("RGB")
+
     if not isinstance(source, (PIL.Image.Image, np.ndarray, torch.Tensor)):
         raise TypeError(
             f"Unsupported ImageInput type: {type(source).__name__}. "
@@ -170,7 +173,7 @@ def _to_pil(
 
     # ─── Normalize float arrays to uint8 ───
     if array.dtype != np.uint8:
-        if array.max() > 1.0 + 1e-6:
+        if array.min() < -1e-6 or array.max() > 1.0 + 1e-6:
             raise ValueError(
                 "Float image values must be in [0, 1] for saving."
             )
