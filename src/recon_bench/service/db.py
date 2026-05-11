@@ -1,7 +1,6 @@
 """SQLite persistence helpers for the optional service."""
 
-from __future__ import annotations
-
+import contextlib
 import datetime
 import json
 import pathlib
@@ -9,24 +8,57 @@ import typing
 
 import aiosqlite
 
-from .schemas import ArtifactOut, EvalMode, JobStatus, MetricValue
+import recon_bench.service.schemas as service_schemas
+
+
+JsonScalar = str | int | float | bool | None
+JsonValue = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
+JobRow = aiosqlite.Row
+ArtifactRecord = tuple[service_schemas.ArtifactOut, pathlib.Path]
 
 
 def utcnow() -> datetime.datetime:
+    """Return an aware UTC timestamp.
+
+    Returns
+    -------
+    datetime.datetime
+        Current UTC time with timezone information.
+    """
     return datetime.datetime.now(datetime.UTC)
 
 
-def _to_json(data: object) -> str:
-    return json.dumps(data, default=str, separators=(",", ":"))
+def _to_json(data: JsonValue) -> str:
+    return json.dumps(data, separators=(",", ":"))
 
 
 class Database:
+    """Async SQLite persistence layer for service jobs.
+
+    Parameters
+    ----------
+    path
+        Filesystem path to the service SQLite database.
+    """
+
+    path: pathlib.Path
+
     def __init__(self, path: pathlib.Path) -> None:
         self.path = path
 
+    @contextlib.asynccontextmanager
+    async def _connect(self) -> typing.AsyncIterator[aiosqlite.Connection]:
+        db = await aiosqlite.connect(self.path)
+        try:
+            await db.execute("PRAGMA foreign_keys = ON")
+            yield db
+        finally:
+            await db.close()
+
     async def init(self) -> None:
+        """Initialize the SQLite schema if needed."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        async with aiosqlite.connect(self.path) as db:
+        async with self._connect() as db:
             await db.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS jobs (
@@ -65,20 +97,34 @@ class Database:
         self,
         *,
         job_id: str,
-        mode: EvalMode,
-        request: dict[str, typing.Any],
+        mode: service_schemas.EvalMode,
+        request: dict[str, JsonValue],
         created_at: datetime.datetime,
     ) -> None:
-        async with aiosqlite.connect(self.path) as db:
+        """Insert a pending job row.
+
+        Parameters
+        ----------
+        job_id
+            UUID string for the job.
+        mode
+            Evaluation mode requested by the client.
+        request
+            JSON-safe request options for diagnostics.
+        created_at
+            Job creation timestamp.
+        """
+        async with self._connect() as db:
             await db.execute(
                 """
-                INSERT INTO jobs (job_id, mode, status, request_json, created_at)
+                INSERT INTO jobs
+                    (job_id, mode, status, request_json, created_at)
                 VALUES (?, ?, ?, ?, ?)
                 """,
                 (
                     job_id,
                     mode.value,
-                    JobStatus.PENDING.value,
+                    service_schemas.JobStatus.PENDING.value,
                     _to_json(request),
                     created_at.isoformat(),
                 ),
@@ -88,16 +134,31 @@ class Database:
     async def set_status(
         self,
         job_id: str,
-        status: JobStatus,
+        status: service_schemas.JobStatus,
         *,
         completed_at: datetime.datetime | None = None,
-        error: dict[str, typing.Any] | None = None,
+        error: dict[str, JsonValue] | None = None,
     ) -> None:
-        async with aiosqlite.connect(self.path) as db:
+        """Update a job lifecycle status.
+
+        Parameters
+        ----------
+        job_id
+            UUID string for the job.
+        status
+            New lifecycle state.
+        completed_at
+            Optional completion timestamp.
+        error
+            Optional JSON-safe error details.
+        """
+        async with self._connect() as db:
             await db.execute(
                 """
                 UPDATE jobs
-                SET status = ?, completed_at = COALESCE(?, completed_at), error_json = ?
+                SET status = ?,
+                    completed_at = COALESCE(?, completed_at),
+                    error_json = ?
                 WHERE job_id = ?
                 """,
                 (
@@ -114,16 +175,18 @@ class Database:
         *,
         job_id: str,
         family: str,
-        metrics: list[MetricValue] | None,
+        metrics: list[service_schemas.MetricValue] | None,
     ) -> None:
+        """Insert metric values for a completed job."""
         if not metrics:
             return
+
         rows = [
             (job_id, family, metric.name, index, value)
             for metric in metrics
             for index, value in enumerate(metric.values)
         ]
-        async with aiosqlite.connect(self.path) as db:
+        async with self._connect() as db:
             await db.executemany(
                 """
                 INSERT INTO metrics (job_id, family, name, item_index, value)
@@ -137,14 +200,17 @@ class Database:
         self,
         *,
         job_id: str,
-        artifacts: list[tuple[ArtifactOut, pathlib.Path]],
+        artifacts: list[ArtifactRecord],
     ) -> None:
+        """Insert generated artifact records for a completed job."""
         if not artifacts:
             return
-        async with aiosqlite.connect(self.path) as db:
+
+        async with self._connect() as db:
             await db.executemany(
                 """
-                INSERT INTO artifacts (artifact_id, job_id, role, item_index, media_type, path)
+                INSERT INTO artifacts
+                    (artifact_id, job_id, role, item_index, media_type, path)
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 [
@@ -161,14 +227,30 @@ class Database:
             )
             await db.commit()
 
-    async def get_job(self, job_id: str) -> aiosqlite.Row | None:
-        async with aiosqlite.connect(self.path) as db:
+    async def get_job(self, job_id: str) -> JobRow | None:
+        """Fetch a job row by ID.
+
+        Parameters
+        ----------
+        job_id
+            UUID string for the job.
+
+        Returns
+        -------
+        JobRow or None
+            SQLite row when found.
+        """
+        async with self._connect() as db:
             db.row_factory = aiosqlite.Row
-            cursor = await db.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,))
+            cursor = await db.execute(
+                "SELECT * FROM jobs WHERE job_id = ?",
+                (job_id,),
+            )
             return await cursor.fetchone()
 
     async def get_artifact_path(self, artifact_id: str) -> pathlib.Path | None:
-        async with aiosqlite.connect(self.path) as db:
+        """Fetch a generated artifact path by artifact ID."""
+        async with self._connect() as db:
             cursor = await db.execute(
                 "SELECT path FROM artifacts WHERE artifact_id = ?",
                 (artifact_id,),
