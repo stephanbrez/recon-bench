@@ -15,6 +15,15 @@ dependencies = [
 [project.scripts]
 rb = "recon_bench.cli:main"
 
+[project.optional-dependencies]
+service = [
+    "aiosqlite",
+    "fastapi",
+    "pydantic",
+    "python-multipart",
+    "uvicorn[standard]",
+]
+
 [tool.uv]
 # Require that the package is available for linux ARM.
 required-environments = [
