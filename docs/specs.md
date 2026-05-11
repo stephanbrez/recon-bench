@@ -518,19 +518,23 @@ To add a command (e.g. `rb eval-meshes`):
 
 ## FastAPI Service
 
-The FastAPI service is an optional delivery surface over the existing library.
-It lives inside the package at `src/recon_bench/service/`, not in a root-level
-`app/` directory and not in a separate repository. The service must delegate to
-the same evaluation code used by the Python API and CLI rather than duplicating
-metric or rendering logic.
+The FastAPI service is an optional HTTP surface over the existing library. It
+lives inside the package at `src/recon_bench/service/` and delegates evaluation
+to `recon_bench.evaluate()`. The service is additive: it does not change the
+public Python API, CLI behavior, or package-level exports used by library
+consumers.
 
-The service is additive. It must not change the public `evaluate()` contract,
-CLI behavior, or package-level exports used by existing library consumers.
+Service dependencies are installed through the optional `service` extra:
+
+```bash
+uv run --extra service uvicorn recon_bench.service.asgi:app
+```
 
 ### Scope
 
-The MVP service is upload-only. Clients submit image and geometry files in the
-request; server-local filesystem paths remain a CLI/library concern.
+The service API is upload-only. Clients submit image and geometry files in
+multipart requests; server-local filesystem paths remain a Python API and CLI
+concern.
 
 Supported evaluation modes:
 
@@ -538,35 +542,29 @@ Supported evaluation modes:
 - `image-vs-mesh`
 - `mesh-vs-mesh`
 
-Service dependencies are optional so that normal library and CLI installations
-stay lean. The intended run shape is:
-
-```bash
-uv run --extra service uvicorn recon_bench.service.asgi:app
-```
+Each evaluation endpoint returns the final JSON response after evaluation
+finishes. The service persists job history, metrics, and artifact metadata, but
+it does not run a background queue.
 
 ### Package Structure
-
-Initial service package layout:
 
 ```text
 src/recon_bench/service/
 ├── __init__.py
-├── asgi.py          # FastAPI app / create_app()
-├── config.py        # Service settings: storage root, DB path, GPU slots, limits
-├── routes.py        # /v1/evals, /v1/jobs, /v1/artifacts, /health
-├── schemas.py       # Pydantic request/response models
-├── storage.py       # Upload and artifact filesystem layout
-├── serialization.py # EvalResult/Profile/tensor conversion to JSON-safe data
+├── asgi.py          # FastAPI app creation and lifespan state
+├── config.py        # Service settings and validation
+├── routes.py        # HTTP route handlers and job lifecycle orchestration
+├── schemas.py       # Pydantic request and response models
+├── storage.py       # Upload and artifact filesystem helpers
+├── serialization.py # EvalResult/Profile/tensor conversion helpers
 └── db.py            # SQLite persistence layer
 ```
 
-This can be split into subpackages later if the service grows, but the MVP
-should keep the surface small.
+`asgi.py` constructs the app, initializes the service directories and SQLite
+schema during lifespan startup, and stores the service config, database handle,
+and GPU semaphore on FastAPI application state.
 
 ### Endpoints
-
-MVP endpoints:
 
 ```text
 POST /v1/evals/image-vs-image
@@ -579,225 +577,98 @@ GET /v1/artifacts/{artifact_id}
 GET /health
 ```
 
-The `POST /v1/evals/...` endpoints return a final JSON response after the
-evaluation completes. Streaming is not required for the MVP.
+`GET /health` returns `{"status": "ok"}`. Artifact URLs in evaluation
+responses point to `GET /v1/artifacts/{artifact_id}`.
 
 ### Request Models
 
-FastAPI multipart uploads are represented as endpoint parameters, not fields on
-the Pydantic request models. The Pydantic models describe the structured
-options submitted alongside uploaded files.
+Multipart files are FastAPI endpoint parameters. Structured options are parsed
+from a JSON form field named `options` into Pydantic models.
 
-```python
-import datetime
-import enum
-import typing
+Common option fields:
 
-import pydantic
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `metrics` | `list[str] \| None` | `None` | Image metrics for image-producing modes |
+| `profile` | `bool` | `False` | Attach timing and memory profile output |
+| `save_renders` | `bool` | `False` | Persist rendered images as artifacts |
+| `shard_size` | `int` | `10` | Image metric shard size; must be positive |
+| `max_size` | `int \| None` | `None` | Optional max image edge length |
+| `background_color` | `tuple[int, int, int]` | `(255, 255, 255)` | RGB color in `[0, 255]` |
 
-import recon_bench
+Camera option fields mirror `recon_bench.Camera`: `position`, `look_at`, `up`,
+`fov`, `width`, `height`, `near`, and `far`. The service validates that
+`far > near`, `fov` is in `(0, 180)`, dimensions are positive and below 10000,
+and `up` components are in `[-1, 1]`.
 
+Mode-specific options:
 
-MetricName = typing.Annotated[str, pydantic.Field(min_length=4, max_length=100)]
-RgbInt = typing.Annotated[int, pydantic.Field(ge=0, le=255)]
-UnitVectorComponent = typing.Annotated[float, pydantic.Field(ge=-1.0, le=1.0)]
+- `image-vs-image` uses common options only.
+- `image-vs-mesh` uses common options plus exactly one of `camera` or
+  `cameras`; a camera source is required.
+- `mesh-vs-mesh` uses common options plus optional `camera`/`cameras`,
+  `image_eval`, `geometry_type`, and `num_points`.
 
-
-class EvalMode(enum.StrEnum):
-    IMAGE_VS_IMAGE = "image-vs-image"
-    IMAGE_VS_MESH = "image-vs-mesh"
-    MESH_VS_MESH = "mesh-vs-mesh"
-
-
-class JobStatus(enum.StrEnum):
-    PENDING = "pending"
-    RUNNING = "running"
-    SAVING_ARTIFACTS = "saving_artifacts"
-    COMPLETED = "completed"
-    FAILED = "failed"
-
-
-class CameraIn(pydantic.BaseModel):
-    position: tuple[float, float, float]
-    look_at: tuple[float, float, float]
-    up: tuple[UnitVectorComponent, UnitVectorComponent, UnitVectorComponent] = (
-        0.0,
-        1.0,
-        0.0,
-    )
-    fov: float = pydantic.Field(default=60.0, gt=0.0, lt=180.0)
-    width: int = pydantic.Field(default=512, gt=0, lt=10000)
-    height: int = pydantic.Field(default=512, gt=0, lt=10000)
-    near: float = pydantic.Field(default=0.01, gt=0.0)
-    far: float = pydantic.Field(default=100.0, gt=0.0)
-
-    @pydantic.model_validator(mode="after")
-    def validate_planes(self) -> "CameraIn":
-        if self.far <= self.near:
-            raise ValueError("far must be greater than near")
-        return self
-
-
-CameraList = typing.Annotated[list[CameraIn], pydantic.Field(min_length=1)]
-
-
-class CamerasPayload(pydantic.BaseModel):
-    camera: CameraIn | None = None
-    cameras: CameraList | None = None
-
-    @pydantic.model_validator(mode="after")
-    def validate_one_camera_source(self) -> "CamerasPayload":
-        if self.camera is not None and self.cameras is not None:
-            raise ValueError("provide either camera or cameras, not both")
-        return self
-
-
-class EvalOptions(pydantic.BaseModel):
-    metrics: list[MetricName] | None = None
-    profile: bool = False
-    save_renders: bool = False
-    shard_size: int = pydantic.Field(default=10, gt=0)
-    max_size: int | None = pydantic.Field(default=None, gt=0)
-    background_color: tuple[RgbInt, RgbInt, RgbInt] = (255, 255, 255)
-
-
-class ImageVsImageOptions(EvalOptions):
-    pass
-
-
-class ImageVsMeshOptions(EvalOptions, CamerasPayload):
-    @pydantic.model_validator(mode="after")
-    def validate_camera_required(self) -> "ImageVsMeshOptions":
-        if self.camera is None and self.cameras is None:
-            raise ValueError("image-vs-mesh requires camera or cameras")
-        return self
-
-
-class MeshVsMeshOptions(EvalOptions, CamerasPayload):
-    image_eval: bool = False
-    geometry_type: recon_bench.GeometryType = recon_bench.GeometryType.MESH
-    num_points: int = pydantic.Field(default=10000, gt=0, le=10000000)
-
-    @pydantic.model_validator(mode="after")
-    def validate_image_eval_geometry(self) -> "MeshVsMeshOptions":
-        if self.image_eval and self.geometry_type == recon_bench.GeometryType.POINTCLOUD:
-            raise ValueError("image_eval is only supported for mesh geometry")
-        return self
-```
-
-`MetricName` constrains each string inside the `metrics` list. Applying
-`min_length` or `max_length` directly to `list[str]` constrains the number of
-items in the list, not the length of each metric name. Mode-specific endpoint
-logic still validates requested metric names against the image or geometry
-metric registries.
-
-`background_color` accepts RGB integers in `[0, 255]`. The service normalizes
-those values to floats in `[0, 1]` before calling `evaluate()`.
-
-Endpoint file parameters remain separate from these models:
-
-```python
-target_files: list[UploadFile]
-prediction_files: list[UploadFile]
-options: ImageVsImageOptions | ImageVsMeshOptions | MeshVsMeshOptions
-```
+`background_color` is normalized to float RGB values in `[0, 1]` before calling
+`evaluate()`. Metric names are passed through to the core metric registries,
+which reject unknown names as evaluator input errors.
 
 ### Request Validation
 
-The service validates request shape before calling `evaluate()` so user input
-errors become `400` responses rather than internal server errors.
+The service validates request shape and upload metadata before calling
+`evaluate()`.
 
-Upload safety rules:
+Upload rules:
 
-- Never use client-provided filenames as filesystem paths.
-- Generate server-side upload filenames under `runs/service/uploads/{job_id}/`.
-- Store original filenames only as metadata for diagnostics.
-- Reject unsupported suffixes using the same image and geometry suffix sets as
-  the library.
-- Enforce configurable upload size and file count limits before evaluation.
+- Client-provided filenames are never used as filesystem paths.
+- Server-side upload paths use UUID filenames under
+  `runs/service/uploads/{job_id}/`.
+- Unsupported suffixes are rejected using the core image and geometry suffix
+  sets.
+- Upload count and per-file byte limits come from `ServiceConfig`.
+- Upload handles are closed on success and on validation or write failures.
 
 Mode-specific file rules:
 
-- `image-vs-image` requires one or more target images and the same number of
-  prediction images.
-- `image-vs-mesh` requires one prediction mesh. With `camera`, it requires one
-  target image. With `cameras`, it requires one target image per camera.
-- `mesh-vs-mesh` MVP accepts one target geometry and one prediction geometry.
-  Batched mesh-vs-mesh service requests are future work.
+- `image-vs-image` accepts `target_files` and `prediction_files`; both lists
+  must be non-empty and equal length.
+- `image-vs-mesh` accepts `target_files` plus one `prediction_file`; the target
+  count must match the camera count.
+- `mesh-vs-mesh` accepts one `target_file` and one `prediction_file`.
 
-Camera rules:
-
-- `image-vs-mesh` requires either `camera` or `cameras`.
-- `mesh-vs-mesh` uses cameras only when `image_eval=True`.
-- `image_eval=True` is supported only for `geometry_type=mesh`.
+`image_eval=True` is valid only for mesh geometry, not point cloud geometry.
 
 ### Response Models
 
-Metrics preserve the library behavior of returning per-item/per-view values
-rather than only mean-reduced scores.
+Metrics preserve the library's per-item/per-view behavior rather than returning
+only mean-reduced values.
 
-```python
-class MetricValue(pydantic.BaseModel):
-    name: str
-    values: list[float]
+| Model | Fields |
+|---|---|
+| `MetricValue` | `name`, `values` |
+| `MetricsOut` | `image`, `geometry` |
+| `ArtifactOut` | `artifact_id`, `role`, `index`, `media_type`, `url` |
+| `ProfileOut` | `timing`, `memory`, `cuda_available` |
+| `EvalResponse` | Job status, metrics, profile, artifacts, and timestamps |
+| `ErrorDetail` | `code`, `message`, `details`, `job_id` |
+| `ErrorResponse` | `error` |
 
-
-class MetricsOut(pydantic.BaseModel):
-    image: list[MetricValue] | None = None
-    geometry: list[MetricValue] | None = None
-
-
-class ArtifactOut(pydantic.BaseModel):
-    artifact_id: str
-    role: typing.Literal["target", "prediction"]
-    index: int
-    media_type: str
-    url: str
-
-
-class ProfileOut(pydantic.BaseModel):
-    timing: list[dict[str, object]]
-    memory: list[dict[str, object]]
-    cuda_available: bool
-
-
-class EvalResponse(pydantic.BaseModel):
-    job_id: str
-    status: JobStatus
-    mode: EvalMode
-    metrics: MetricsOut
-    profile: ProfileOut | None = None
-    artifacts: list[ArtifactOut] = pydantic.Field(default_factory=list)
-    created_at: datetime.datetime
-    completed_at: datetime.datetime | None = None
-
-
-class ErrorDetail(pydantic.BaseModel):
-    code: str
-    message: str
-    details: dict[str, object] = pydantic.Field(default_factory=dict)
-    job_id: str | None = None
-
-
-class ErrorResponse(pydantic.BaseModel):
-    error: ErrorDetail
-```
+`ArtifactOut.role` is either `target` or `prediction`. Generated render
+artifacts use `image/png` media type and are returned by URL rather than
+embedded in the response body.
 
 ### Persistence
 
-Use SQLite for MVP persistence. The database records evaluation history, but it
-does not act as a background job queue in the initial design.
+The service uses SQLite for job history. SQLite foreign key enforcement is
+enabled for every connection.
 
-The service initializes the database during FastAPI lifespan startup and uses
-UUID string IDs for jobs and artifacts. A migration framework is unnecessary for
-the MVP; schema evolution can be handled later if the service grows.
+Persisted tables:
 
-Persisted records:
-
-- `jobs` — lifecycle status, mode, request configuration, timestamps, and error
-  information
-- `metrics` — individual metric values with item/view indexes
-- `artifacts` — render metadata and filesystem-backed artifact locations
+| Table | Description |
+|---|---|
+| `jobs` | Job ID, mode, lifecycle status, request options, errors, timestamps |
+| `metrics` | Metric family, metric name, item index, and value |
+| `artifacts` | Artifact ID, role, item index, media type, and filesystem path |
 
 Job status values:
 
@@ -807,73 +678,67 @@ Job status values:
 - `completed`
 - `failed`
 
-### Artifact Storage
+Job and artifact identifiers are UUID strings.
 
-Store uploads and generated artifacts under a service-specific runtime
-directory using UUID-based job and artifact names:
+### Runtime Storage
+
+Runtime service files are stored under `runs/service/`:
 
 ```text
 runs/service/
-├── uploads/{job_id}/...
+├── service.sqlite3
+├── uploads/{job_id}/{uuid}.{suffix}
 └── artifacts/{job_id}/{artifact_id}.png
 ```
 
-Saved renders are returned as artifact records with URLs, not embedded directly
-in the JSON response. The service should delegate image writing to the existing
-I/O layer (`save_image`) rather than implementing a separate image writer.
+Generated render artifacts are written through the existing image I/O layer
+(`save_image`) so service artifact encoding stays consistent with the library.
 
 ### Concurrency Model
 
-Concurrency is request/job-level, not intra-evaluation. FastAPI may accept and
-prepare multiple requests concurrently, but the GPU-heavy evaluation section is
-guarded by a configurable semaphore, defaulting to one concurrent evaluation.
-Because `evaluate()` is synchronous and may block on CPU, GPU, and Open3D work,
-the service runs it in a worker thread while the event loop remains responsive.
+Concurrency is request/job-level, not intra-evaluation. Upload handling and
+request preparation can overlap across requests. The synchronous
+`recon_bench.evaluate()` call runs in a worker thread behind a configurable GPU
+semaphore, defaulting to one concurrent evaluation.
 
-Lifecycle:
+Evaluation lifecycle:
 
-1. Receive request and upload files.
-2. Create a `pending` job record.
-3. Wait for the GPU semaphore.
-4. Mark the job `running` and run `evaluate()` in a worker thread.
-5. Convert metrics/results to JSON-safe CPU data.
-6. Release the GPU semaphore.
-7. Save render artifacts if requested.
-8. Persist final metrics/artifacts and mark the job `completed`.
-9. Return the final response.
+1. Validate request shape and save uploads.
+2. Create a `pending` job row.
+3. Mark the job `running`.
+4. Wait for the GPU semaphore and run `evaluate()` in a worker thread.
+5. Keep the semaphore held until the worker thread finishes, including if the
+   request task is cancelled.
+6. Convert metric tensors and profile data to JSON-safe response models.
+7. Save render artifacts in a worker thread when `save_renders=True`.
+8. Persist metrics/artifacts and mark the job `completed`.
+9. Return the final JSON response.
 
-This allows one request to upload and prepare while another request is running
-evaluation. It also allows the next evaluation to start after the previous
-request releases the GPU semaphore, even if the previous request is still doing
-CPU/disk-side artifact work.
-
-For MVP deployment, assume a single Uvicorn worker process. Cross-process or
-multi-node GPU locking is future work.
+Artifact saving happens after evaluation, so the next evaluation can start once
+the previous evaluator has released the semaphore. For MVP deployment, assume a
+single Uvicorn worker process; cross-process and multi-node GPU locking are
+future concerns.
 
 ### Error Handling
 
-MVP evaluation is atomic: if one requested metric fails, the whole evaluation
-fails. Partial metric success is deferred until the evaluator supports an
-event-based or streaming flow.
+Evaluation is atomic at the service layer: any evaluator error fails the whole
+job. Partial metric success is not represented in the response.
 
 HTTP error mapping:
 
-- Request validation failure → `422`
-- Unsupported file type or invalid mode options → `400`
-- Missing uploaded file → `400`
-- Upload too large → `413`
+- Pydantic request validation failure → `422`
+- Invalid file counts, unsupported suffixes, invalid upload size, or invalid
+  mode shape before job creation → `400` without a `job_id`
 - Expected evaluator input errors (`ValueError`, `TypeError`) → mark job
-  `failed`, return `400`
-- Unexpected evaluation failure → mark job `failed`, return `500`
-- Artifact save failure when `save_renders` was requested → mark job `failed`,
-  return `500`
-- Database failure → `500`
+  `failed`, return `400` with `job_id`
+- Request cancellation during evaluation → keep the semaphore until the worker
+  thread finishes, mark job `failed`, and propagate cancellation
+- Unexpected evaluation failures → mark job `failed`, return `500` with
+  `job_id`
+- Artifact saving or final persistence failures → mark job `failed`, return
+  `500` with `job_id`
 
-If failure happens before a job is created, return an HTTP error without a
-`job_id`. If failure happens after job creation, persist the failed status and
-include `job_id` in the error response.
-
-Error responses should use a consistent shape:
+Error responses use a consistent wrapper shape:
 
 ```json
 {
@@ -886,36 +751,29 @@ Error responses should use a consistent shape:
 }
 ```
 
-### Streaming
+### Configuration
 
-Streaming is not part of the first MVP. If the final-response service lands
-quickly, add NDJSON streaming as a bonus endpoint rather than SSE:
+`ServiceConfig` controls runtime paths and limits:
 
-```text
-POST /v1/evals/{mode}/stream
-```
+| Field | Default | Description |
+|---|---|---|
+| `storage_root` | `runs/service` | Root for uploads and artifacts |
+| `db_path` | `runs/service/service.sqlite3` | SQLite database path |
+| `gpu_slots` | `1` | Concurrent evaluator slots; must be at least 1 |
+| `max_upload_bytes` | `512 * 1024 * 1024` | Per-file upload limit |
+| `max_files` | `128` | Per-field upload count limit; must be positive |
 
-Initial stream events should be coarse lifecycle events:
-
-- `accepted`
-- `uploaded`
-- `waiting_for_gpu`
-- `evaluating`
-- `saving_artifacts`
-- `completed`
-- `failed`
-
-Metric-by-metric streaming requires refactoring the evaluation pipeline into an
-event-emitting flow and is future work.
+Environment-variable configuration is not part of the current service surface.
 
 ### Future Improvements
 
 Deferred service features:
 
 - Producer/consumer background job queue
+- Streaming endpoint for coarse lifecycle events
 - Server-Sent Events subscriptions
 - Event replay
-- Job cancellation
+- Job cancellation API
 - Authentication and authorization
 - Rate limits and quotas
 - Artifact cleanup and retention policies
