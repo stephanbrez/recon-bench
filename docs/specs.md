@@ -41,12 +41,12 @@ src/
 │   └── renderer.py          # Open3D OffscreenRenderer: mesh + camera → image tensor
 ├── metrics/
 │   ├── __init__.py
-│   ├── core.py              # Individual metric functions (psnr, ssim, lpips, chamfer)
+│   ├── core.py              # Individual image and geometry metric functions
 │   ├── image.py             # Aggregator: compute all image metrics in one call
 │   └── geometry.py          # Aggregator: compute all geometry metrics in one call
 ├── profiling/
 │   ├── __init__.py          # Public exports: Timer, MemoryTracker, ProfileResult, etc.
-│   ├── profile.py           # Result dataclasses: TimingEntry, MemoryEntry, ProfileResult
+│   ├── _types.py            # Result dataclasses: TimingEntry, MemoryEntry, ProfileResult
 │   ├── timer.py             # Hierarchical wall-clock timer with CUDA sync
 │   └── memory.py            # GPU memory tracker per section (torch.cuda)
 ├── utils/
@@ -56,7 +56,9 @@ src/
 │   └── format.py            # Plain-text table and tree formatting
 ├── cli/
 │   ├── __init__.py          # Top-level ``rb`` dispatcher (argparse subcommands)
-│   └── eval_images.py       # ``rb eval-images``: batch image-vs-image evaluation
+│   ├── eval_images.py       # ``rb eval-images``: batch image-vs-image evaluation
+│   ├── eval_pcd.py          # ``rb eval-pcd``: point cloud evaluation
+│   └── visualize_pcd.py     # ``rb visualize-pcd``: point cloud visualization
 ├── geometry/
 ├── datasets/
 └── models/
@@ -88,9 +90,9 @@ import recon_bench
 | `EvalResult` | dataclass | `recon_bench._types` |
 | `GeometryArrays` | `TypedDict` | `recon_bench._types` |
 | `GeometryType` | enum | `recon_bench._types` |
-| `ProfileResult` | dataclass | `recon_bench.profiling.profile` |
-| `TimingEntry` | dataclass | `recon_bench.profiling.profile` |
-| `MemoryEntry` | dataclass | `recon_bench.profiling.profile` |
+| `ProfileResult` | dataclass | `recon_bench.profiling._types` |
+| `TimingEntry` | dataclass | `recon_bench.profiling._types` |
+| `MemoryEntry` | dataclass | `recon_bench.profiling._types` |
 | `Timer` | class | `recon_bench.profiling.timer` |
 | `MemoryTracker` | class | `recon_bench.profiling.memory` |
 
@@ -112,6 +114,9 @@ evaluate(
     geometry_type: GeometryType = GeometryType.MESH,
     num_points: int = 10000,
     profile: bool = False,
+    shard_size: int = 10,
+    max_size: int | None = None,
+    background_color: tuple[float, float, float] = (1.0, 1.0, 1.0),
 ) -> EvalResult
 ```
 
@@ -124,6 +129,12 @@ evaluate(
 - `image_metrics` selects which image metrics to compute; `None` means all
 - `profile` enables wall-clock timing and GPU memory tracking per step;
   results are attached to `EvalResult.profile`
+- `shard_size` limits how many images are processed per image-metric shard,
+  reducing peak GPU memory for large batches
+- `max_size` optionally downscales images so the longest edge is at most that
+  many pixels before metric computation
+- `background_color` controls rendered mesh background color as RGB floats in
+  `[0, 1]`
 
 **Mode inference** (when `mode=None`):
 
@@ -212,7 +223,9 @@ type was not performed.
 |---|---|---|
 | `image_metrics` | `dict[str, torch.Tensor] \| None` | Per-item image scores, each tensor shape `(N,)` |
 | `geometry_metrics` | `dict[str, torch.Tensor] \| None` | Per-item geometry scores, each tensor shape `(N,)` |
-| `rendered_images` | `dict[str, torch.Tensor] \| None` | Renders keyed by "target"/"prediction"; `(C,H,W)` single view, `(N,C,H,W)` multi-view |
+| `rendered_images` | `dict[str, torch.Tensor] \| None` | Renders keyed by "target"/"prediction"; always `(N,C,H,W)`, including single-view output where `N == 1` |
+| `target_paths` | `list[pathlib.Path] \| None` | Target image paths when path inputs were provided, used for per-item labels |
+| `target_images` | `torch.Tensor \| None` | Loaded target images when in-memory image inputs were provided; `(N,C,H,W)` |
 | `profile` | `ProfileResult \| None` | Timing and GPU memory data (when `profile=True`) |
 
 Metric tensors are **not** mean-reduced — users call `.mean()`, `.std()`, or
@@ -224,6 +237,10 @@ group, plus the profiling tree if present). `detail(filenames=None)` returns a
 per-item breakdown table when `N > 1`, using *filenames* as row labels (falls
 back to numeric indices when omitted). The two methods are independent —
 library users can call either or both.
+
+`save_renders(output_dir)` writes any rendered images to disk as PNG files named
+`{role}_{index}.png`. `save_targets(output_dir)` writes in-memory target images
+as `target_{index}.png` when `target_images` is populated.
 
 ## Batching
 
@@ -264,6 +281,8 @@ All accept `ImageInput | list[ImageInput]` and return `torch.Tensor` shape `(N,)
 | Metric | Function | Return | Interpretation |
 |---|---|---|---|
 | Chamfer Distance | `chamfer_distance(target, data, mode, num_points)` | `float \| list[float]` | Lower is better |
+| Hausdorff Distance | `hausdorff_distance(target, data, mode, num_points)` | `float \| list[float]` | Lower is better |
+| F-score | `fscore(target, data, mode, num_points, thresholds)` | `list[float] \| list[list[float]]` | Higher is better |
 
 Accepts `MeshInput | list[MeshInput]`. Supports mesh and point cloud modes
 via `GeometryType`.
@@ -271,11 +290,14 @@ via `GeometryType`.
 ### Aggregators
 
 - `compute_image_metrics(target, data, metrics=None)` → `dict[str, torch.Tensor]`
-- `compute_geometry_metrics(target, data, metrics=None, ...)` → `dict[str, torch.Tensor]`
+- `compute_geometry_metrics(target, data, metrics=None, mode=GeometryType.MESH, num_points=10000, thresholds=None)` → `dict[str, torch.Tensor]`
 
 Both return per-item scores as tensors of shape `(N,)`. Users call `.mean()`
 to reduce. Both use a registry pattern — new metrics are added to the
 `_METRIC_REGISTRY` dict in the respective module.
+
+When multiple F-score thresholds are requested, geometry aggregation returns one
+tensor per threshold using keys like `fscore_0.01`.
 
 ## I/O Layer
 
@@ -324,8 +346,7 @@ viewpoint, producing per-view metric scores.
    `(N, C, H, W)` tensors.
 3. The stacked renders are passed to `compute_image_metrics`, which returns
    per-view `(N,)` tensors.
-4. For single-camera calls, `rendered_images` values are squeezed back to
-   `(C, H, W)` for backward compatibility.
+4. Single-camera calls keep the same `(N, C, H, W)` shape with `N == 1`.
 
 ### `Camera.orbit_ring()`
 
@@ -416,7 +437,7 @@ call sites.
 **CPU fallback**: When CUDA is unavailable, all values report zero and
 `cuda_available` is `False`. No errors are raised.
 
-### Result Types (`profiling/profile.py`)
+### Result Types (`profiling/_types.py`)
 
 | Type | Fields | Description |
 |---|---|---|
@@ -424,7 +445,8 @@ call sites.
 | `MemoryEntry` | `name`, `peak_mb`, `delta_mb`, `children` | Single memory node in the tree |
 | `ProfileResult` | `timing`, `memory`, `cuda_available` | Aggregated report attached to `EvalResult` |
 
-`ProfileResult.summary()` returns a human-readable tree with `├──`/`└──`
+`ProfileResult.summary()` returns compact timing and memory tables.
+`ProfileResult.detail()` returns a human-readable tree with `├──`/`└──`
 connectors, displaying timing and memory sections hierarchically.
 
 ### Integration with `evaluate()`
@@ -454,7 +476,7 @@ via `typing.TYPE_CHECKING`:
 
 ```python
 if typing.TYPE_CHECKING:
-    from .profiling import profile as _profile_mod
+    from .profiling import _types as _profile_mod
     ProfileResult = _profile_mod.ProfileResult
 else:
     ProfileResult = typing.Any
@@ -468,6 +490,12 @@ so that the annotation `ProfileResult | None` is a string at runtime (PEP 563).
 The package exposes a single `rb` entry point via `[project.scripts]` in
 `pyproject.toml`, dispatched through `cli/__init__.py` using argparse
 subcommands.
+
+Current subcommands:
+
+- `rb eval-images` — batch image-vs-image evaluation.
+- `rb eval-pcd` — point cloud evaluation against a reference cloud.
+- `rb visualize-pcd` — render a point cloud visualization.
 
 ### Adding a new subcommand
 
@@ -487,6 +515,415 @@ To add a command (e.g. `rb eval-meshes`):
 - All flags must have both short (`-t`) and long (`--target`) forms
 - Short flags use lowercase; `-P` (uppercase) is reserved for `--profile` to
   avoid conflict with `-p` (`--prediction`)
+
+## FastAPI Service
+
+The FastAPI service is an optional delivery surface over the existing library.
+It lives inside the package at `src/recon_bench/service/`, not in a root-level
+`app/` directory and not in a separate repository. The service must delegate to
+the same evaluation code used by the Python API and CLI rather than duplicating
+metric or rendering logic.
+
+The service is additive. It must not change the public `evaluate()` contract,
+CLI behavior, or package-level exports used by existing library consumers.
+
+### Scope
+
+The MVP service is upload-only. Clients submit image and geometry files in the
+request; server-local filesystem paths remain a CLI/library concern.
+
+Supported evaluation modes:
+
+- `image-vs-image`
+- `image-vs-mesh`
+- `mesh-vs-mesh`
+
+Service dependencies are optional so that normal library and CLI installations
+stay lean. The intended run shape is:
+
+```bash
+uv run --extra service uvicorn recon_bench.service.asgi:app
+```
+
+### Package Structure
+
+Initial service package layout:
+
+```text
+src/recon_bench/service/
+├── __init__.py
+├── asgi.py          # FastAPI app / create_app()
+├── config.py        # Service settings: storage root, DB path, GPU slots, limits
+├── routes.py        # /v1/evals, /v1/jobs, /v1/artifacts, /health
+├── schemas.py       # Pydantic request/response models
+├── storage.py       # Upload and artifact filesystem layout
+├── serialization.py # EvalResult/Profile/tensor conversion to JSON-safe data
+└── db.py            # SQLite persistence layer
+```
+
+This can be split into subpackages later if the service grows, but the MVP
+should keep the surface small.
+
+### Endpoints
+
+MVP endpoints:
+
+```text
+POST /v1/evals/image-vs-image
+POST /v1/evals/image-vs-mesh
+POST /v1/evals/mesh-vs-mesh
+
+GET /v1/jobs/{job_id}
+GET /v1/jobs/{job_id}/result
+GET /v1/artifacts/{artifact_id}
+GET /health
+```
+
+The `POST /v1/evals/...` endpoints return a final JSON response after the
+evaluation completes. Streaming is not required for the MVP.
+
+### Request Models
+
+FastAPI multipart uploads are represented as endpoint parameters, not fields on
+the Pydantic request models. The Pydantic models describe the structured
+options submitted alongside uploaded files.
+
+```python
+import datetime
+import enum
+import typing
+
+import pydantic
+
+import recon_bench
+
+
+MetricName = typing.Annotated[str, pydantic.Field(min_length=4, max_length=100)]
+RgbInt = typing.Annotated[int, pydantic.Field(ge=0, le=255)]
+UnitVectorComponent = typing.Annotated[float, pydantic.Field(ge=-1.0, le=1.0)]
+
+
+class EvalMode(enum.StrEnum):
+    IMAGE_VS_IMAGE = "image-vs-image"
+    IMAGE_VS_MESH = "image-vs-mesh"
+    MESH_VS_MESH = "mesh-vs-mesh"
+
+
+class JobStatus(enum.StrEnum):
+    PENDING = "pending"
+    RUNNING = "running"
+    SAVING_ARTIFACTS = "saving_artifacts"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class CameraIn(pydantic.BaseModel):
+    position: tuple[float, float, float]
+    look_at: tuple[float, float, float]
+    up: tuple[UnitVectorComponent, UnitVectorComponent, UnitVectorComponent] = (
+        0.0,
+        1.0,
+        0.0,
+    )
+    fov: float = pydantic.Field(default=60.0, gt=0.0, lt=180.0)
+    width: int = pydantic.Field(default=512, gt=0, lt=10000)
+    height: int = pydantic.Field(default=512, gt=0, lt=10000)
+    near: float = pydantic.Field(default=0.01, gt=0.0)
+    far: float = pydantic.Field(default=100.0, gt=0.0)
+
+    @pydantic.model_validator(mode="after")
+    def validate_planes(self) -> "CameraIn":
+        if self.far <= self.near:
+            raise ValueError("far must be greater than near")
+        return self
+
+
+CameraList = typing.Annotated[list[CameraIn], pydantic.Field(min_length=1)]
+
+
+class CamerasPayload(pydantic.BaseModel):
+    camera: CameraIn | None = None
+    cameras: CameraList | None = None
+
+    @pydantic.model_validator(mode="after")
+    def validate_one_camera_source(self) -> "CamerasPayload":
+        if self.camera is not None and self.cameras is not None:
+            raise ValueError("provide either camera or cameras, not both")
+        return self
+
+
+class EvalOptions(pydantic.BaseModel):
+    metrics: list[MetricName] | None = None
+    profile: bool = False
+    save_renders: bool = False
+    shard_size: int = pydantic.Field(default=10, gt=0)
+    max_size: int | None = pydantic.Field(default=None, gt=0)
+    background_color: tuple[RgbInt, RgbInt, RgbInt] = (255, 255, 255)
+
+
+class ImageVsImageOptions(EvalOptions):
+    pass
+
+
+class ImageVsMeshOptions(EvalOptions, CamerasPayload):
+    @pydantic.model_validator(mode="after")
+    def validate_camera_required(self) -> "ImageVsMeshOptions":
+        if self.camera is None and self.cameras is None:
+            raise ValueError("image-vs-mesh requires camera or cameras")
+        return self
+
+
+class MeshVsMeshOptions(EvalOptions, CamerasPayload):
+    image_eval: bool = False
+    geometry_type: recon_bench.GeometryType = recon_bench.GeometryType.MESH
+    num_points: int = pydantic.Field(default=10000, gt=0, le=10000000)
+
+    @pydantic.model_validator(mode="after")
+    def validate_image_eval_geometry(self) -> "MeshVsMeshOptions":
+        if self.image_eval and self.geometry_type == recon_bench.GeometryType.POINTCLOUD:
+            raise ValueError("image_eval is only supported for mesh geometry")
+        return self
+```
+
+`MetricName` constrains each string inside the `metrics` list. Applying
+`min_length` or `max_length` directly to `list[str]` constrains the number of
+items in the list, not the length of each metric name. Mode-specific endpoint
+logic still validates requested metric names against the image or geometry
+metric registries.
+
+`background_color` accepts RGB integers in `[0, 255]`. The service normalizes
+those values to floats in `[0, 1]` before calling `evaluate()`.
+
+Endpoint file parameters remain separate from these models:
+
+```python
+target_files: list[UploadFile]
+prediction_files: list[UploadFile]
+options: ImageVsImageOptions | ImageVsMeshOptions | MeshVsMeshOptions
+```
+
+### Request Validation
+
+The service validates request shape before calling `evaluate()` so user input
+errors become `400` responses rather than internal server errors.
+
+Upload safety rules:
+
+- Never use client-provided filenames as filesystem paths.
+- Generate server-side upload filenames under `runs/service/uploads/{job_id}/`.
+- Store original filenames only as metadata for diagnostics.
+- Reject unsupported suffixes using the same image and geometry suffix sets as
+  the library.
+- Enforce configurable upload size and file count limits before evaluation.
+
+Mode-specific file rules:
+
+- `image-vs-image` requires one or more target images and the same number of
+  prediction images.
+- `image-vs-mesh` requires one prediction mesh. With `camera`, it requires one
+  target image. With `cameras`, it requires one target image per camera.
+- `mesh-vs-mesh` MVP accepts one target geometry and one prediction geometry.
+  Batched mesh-vs-mesh service requests are future work.
+
+Camera rules:
+
+- `image-vs-mesh` requires either `camera` or `cameras`.
+- `mesh-vs-mesh` uses cameras only when `image_eval=True`.
+- `image_eval=True` is supported only for `geometry_type=mesh`.
+
+### Response Models
+
+Metrics preserve the library behavior of returning per-item/per-view values
+rather than only mean-reduced scores.
+
+```python
+class MetricValue(pydantic.BaseModel):
+    name: str
+    values: list[float]
+
+
+class MetricsOut(pydantic.BaseModel):
+    image: list[MetricValue] | None = None
+    geometry: list[MetricValue] | None = None
+
+
+class ArtifactOut(pydantic.BaseModel):
+    artifact_id: str
+    role: typing.Literal["target", "prediction"]
+    index: int
+    media_type: str
+    url: str
+
+
+class ProfileOut(pydantic.BaseModel):
+    timing: list[dict[str, object]]
+    memory: list[dict[str, object]]
+    cuda_available: bool
+
+
+class EvalResponse(pydantic.BaseModel):
+    job_id: str
+    status: JobStatus
+    mode: EvalMode
+    metrics: MetricsOut
+    profile: ProfileOut | None = None
+    artifacts: list[ArtifactOut] = pydantic.Field(default_factory=list)
+    created_at: datetime.datetime
+    completed_at: datetime.datetime | None = None
+
+
+class ErrorDetail(pydantic.BaseModel):
+    code: str
+    message: str
+    details: dict[str, object] = pydantic.Field(default_factory=dict)
+    job_id: str | None = None
+
+
+class ErrorResponse(pydantic.BaseModel):
+    error: ErrorDetail
+```
+
+### Persistence
+
+Use SQLite for MVP persistence. The database records evaluation history, but it
+does not act as a background job queue in the initial design.
+
+The service initializes the database during FastAPI lifespan startup and uses
+UUID string IDs for jobs and artifacts. A migration framework is unnecessary for
+the MVP; schema evolution can be handled later if the service grows.
+
+Persisted records:
+
+- `jobs` — lifecycle status, mode, request configuration, timestamps, and error
+  information
+- `metrics` — individual metric values with item/view indexes
+- `artifacts` — render metadata and filesystem-backed artifact locations
+
+Job status values:
+
+- `pending`
+- `running`
+- `saving_artifacts`
+- `completed`
+- `failed`
+
+### Artifact Storage
+
+Store uploads and generated artifacts under a service-specific runtime
+directory using UUID-based job and artifact names:
+
+```text
+runs/service/
+├── uploads/{job_id}/...
+└── artifacts/{job_id}/{artifact_id}.png
+```
+
+Saved renders are returned as artifact records with URLs, not embedded directly
+in the JSON response. The service should delegate image writing to the existing
+I/O layer (`save_image`) rather than implementing a separate image writer.
+
+### Concurrency Model
+
+Concurrency is request/job-level, not intra-evaluation. FastAPI may accept and
+prepare multiple requests concurrently, but the GPU-heavy evaluation section is
+guarded by a configurable semaphore, defaulting to one concurrent evaluation.
+Because `evaluate()` is synchronous and may block on CPU, GPU, and Open3D work,
+the service runs it in a worker thread while the event loop remains responsive.
+
+Lifecycle:
+
+1. Receive request and upload files.
+2. Create a `pending` job record.
+3. Wait for the GPU semaphore.
+4. Mark the job `running` and run `evaluate()` in a worker thread.
+5. Convert metrics/results to JSON-safe CPU data.
+6. Release the GPU semaphore.
+7. Save render artifacts if requested.
+8. Persist final metrics/artifacts and mark the job `completed`.
+9. Return the final response.
+
+This allows one request to upload and prepare while another request is running
+evaluation. It also allows the next evaluation to start after the previous
+request releases the GPU semaphore, even if the previous request is still doing
+CPU/disk-side artifact work.
+
+For MVP deployment, assume a single Uvicorn worker process. Cross-process or
+multi-node GPU locking is future work.
+
+### Error Handling
+
+MVP evaluation is atomic: if one requested metric fails, the whole evaluation
+fails. Partial metric success is deferred until the evaluator supports an
+event-based or streaming flow.
+
+HTTP error mapping:
+
+- Request validation failure → `422`
+- Unsupported file type or invalid mode options → `400`
+- Missing uploaded file → `400`
+- Upload too large → `413`
+- Expected evaluator input errors (`ValueError`, `TypeError`) → mark job
+  `failed`, return `400`
+- Unexpected evaluation failure → mark job `failed`, return `500`
+- Artifact save failure when `save_renders` was requested → mark job `failed`,
+  return `500`
+- Database failure → `500`
+
+If failure happens before a job is created, return an HTTP error without a
+`job_id`. If failure happens after job creation, persist the failed status and
+include `job_id` in the error response.
+
+Error responses should use a consistent shape:
+
+```json
+{
+  "error": {
+    "code": "evaluation_failed",
+    "message": "Evaluation failed while computing metrics.",
+    "details": {},
+    "job_id": "..."
+  }
+}
+```
+
+### Streaming
+
+Streaming is not part of the first MVP. If the final-response service lands
+quickly, add NDJSON streaming as a bonus endpoint rather than SSE:
+
+```text
+POST /v1/evals/{mode}/stream
+```
+
+Initial stream events should be coarse lifecycle events:
+
+- `accepted`
+- `uploaded`
+- `waiting_for_gpu`
+- `evaluating`
+- `saving_artifacts`
+- `completed`
+- `failed`
+
+Metric-by-metric streaming requires refactoring the evaluation pipeline into an
+event-emitting flow and is future work.
+
+### Future Improvements
+
+Deferred service features:
+
+- Producer/consumer background job queue
+- Server-Sent Events subscriptions
+- Event replay
+- Job cancellation
+- Authentication and authorization
+- Rate limits and quotas
+- Artifact cleanup and retention policies
+- Cross-process and multi-node GPU locking
+- Remote/object storage for uploads and artifacts
+- Server-local path inputs
+- Metric-by-metric evaluator callbacks
+- Partial metric success when one metric fails
 
 ## Design Decisions
 
@@ -511,6 +948,8 @@ To add a command (e.g. `rb eval-meshes`):
 
 ## Dependencies
 
+Core runtime dependencies:
+
 | Package | Purpose |
 |---|---|
 | `torch` | Tensor operations, GPU compute |
@@ -518,3 +957,13 @@ To add a command (e.g. `rb eval-meshes`):
 | `open3d` | Geometry I/O, mesh metrics, offscreen rendering |
 | `torchmetrics` | SSIM (windowed), LPIPS implementations |
 | `Pillow` | Image file I/O |
+
+Optional service dependencies, installed via the `service` extra:
+
+| Package | Purpose |
+|---|---|
+| `fastapi` | HTTP API framework and request validation |
+| `uvicorn[standard]` | ASGI server for running the service |
+| `pydantic` | Service request and response schemas |
+| `aiosqlite` | Async SQLite access for service persistence |
+| `python-multipart` | Multipart form/file upload parsing in FastAPI |
