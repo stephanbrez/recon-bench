@@ -103,6 +103,16 @@ def _resolve_schema_ref(
     return _object_map(component) or schema
 
 
+def _inline_component_schema(
+    document: OpenApiDocument,
+    model: type[pydantic.BaseModel],
+) -> dict[str, object]:
+    component = _component_schemas(document).get(model.__name__)
+    if isinstance(component, dict):
+        return typing.cast(dict[str, object], component)
+    return {"$ref": f"{SCHEMA_REF_PREFIX}{model.__name__}"}
+
+
 def _patch_multipart_option_schemas(document: OpenApiDocument) -> None:
     for path, model in OPENAPI_OPTION_MODELS.items():
         schema = _resolve_schema_ref(
@@ -110,9 +120,10 @@ def _patch_multipart_option_schemas(document: OpenApiDocument) -> None:
             _multipart_schema(document, path),
         )
         properties = _schema_properties(schema)
-        properties[OPTIONS_FORM_FIELD] = {
-            "$ref": f"{SCHEMA_REF_PREFIX}{model.__name__}",
-        }
+        properties[OPTIONS_FORM_FIELD] = _inline_component_schema(
+            document,
+            model,
+        )
 
 
 def _install_openapi(app: fastapi.FastAPI) -> None:
