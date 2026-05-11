@@ -8,7 +8,13 @@ with a single function call.
 ## Installation
 
 ```bash
-uv pip install -e .
+uv sync
+```
+
+Install the optional HTTP service dependencies with:
+
+```bash
+uv sync --extra service
 ```
 
 ## Quick Start
@@ -298,7 +304,7 @@ printed and evaluation proceeds up to the smaller count.
 | `-m` | `--metrics` | Space-separated metric names; omit for all |
 | `-P` | `--profile` | Enable timing + GPU memory profiling |
 | `-s` | `--summary-only` | Show only mean metrics, suppress per-item detail |
-| `-M` | `--match-names` | Pair by filename stem instead of sorted position; unmatched files are skipped |
+| `-M` | `--match-names` | Pair by filename stem; skip unmatched files |
 
 ```bash
 rb eval-images -t data/gt/ -p data/pred/
@@ -417,6 +423,154 @@ rb visualize-pcd ref.ply pred.ply -o overlay.png \
 rb visualize-pcd ref.ply pred.ply -o overlay.png --elevation 40 --azimuth 135
 ```
 
+## HTTP API Service
+
+`recon-bench` includes an optional FastAPI service for running evaluations over
+HTTP. The service uses the same evaluation code as the Python API and CLI.
+
+Start the service with:
+
+```bash
+uv run --extra service uvicorn recon_bench.service.asgi:app
+```
+
+By default, the API is available at `http://127.0.0.1:8000`.
+
+### Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/v1/evals/image-vs-image` | Compare uploaded target and prediction images |
+| `POST` | `/v1/evals/image-vs-mesh` | Compare references to a rendered mesh |
+| `POST` | `/v1/evals/mesh-vs-mesh` | Compare uploaded geometry files |
+| `GET` | `/v1/jobs/{job_id}` | Fetch persisted job metadata |
+| `GET` | `/v1/jobs/{job_id}/result` | Fetch completed job metadata |
+| `GET` | `/v1/artifacts/{artifact_id}` | Download a generated render artifact |
+| `GET` | `/health` | Check service health |
+
+Evaluation endpoints return a final JSON response after the evaluation
+finishes. They do not start background jobs.
+
+### Request Format
+
+Evaluation requests use `multipart/form-data`:
+
+- Upload files are sent as file fields.
+- Structured options are sent as a JSON string in the `options` form field.
+- Client filenames are used only for suffix validation, not as server paths.
+
+Common `options` fields:
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `metrics` | `list[str]` or `null` | `null` | Image metric names; omit for all |
+| `profile` | `bool` | `false` | Include timing and memory profile data |
+| `save_renders` | `bool` | `false` | Save generated renders as downloadable artifacts |
+| `shard_size` | `int` | `10` | Image metric shard size |
+| `max_size` | `int` or `null` | `null` | Optional max image edge length |
+| `background_color` | `[int, int, int]` | `[255, 255, 255]` | Render background RGB |
+
+### Image vs Image
+
+Send matching `target_files` and `prediction_files` fields. Multiple files are
+allowed, but both lists must have the same length.
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/evals/image-vs-image \
+    -F 'target_files=@gt.png' \
+    -F 'prediction_files=@pred.png' \
+    -F 'options={"metrics":["psnr","ssim"],"profile":false}'
+```
+
+### Image vs Mesh
+
+Send one prediction mesh and one target image per camera. Provide either
+`camera` for a single view or `cameras` for multiple views.
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/evals/image-vs-mesh \
+    -F 'target_files=@reference.png' \
+    -F 'prediction_file=@model.obj' \
+    -F 'options={"camera":{"position":[0,0,3],"look_at":[0,0,0]},"save_renders":true}'
+```
+
+When `save_renders` is `true`, generated renders are returned as artifact
+records with URLs such as `/v1/artifacts/{artifact_id}`.
+
+### Mesh vs Mesh
+
+Send one target geometry and one prediction geometry. Geometry metrics are
+computed by default. Set `image_eval=true` and provide a camera to also compute
+rendered image metrics.
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/evals/mesh-vs-mesh \
+    -F 'target_file=@gt.obj' \
+    -F 'prediction_file=@pred.obj' \
+    -F 'options={"image_eval":false,"num_points":10000}'
+```
+
+Point cloud evaluation is supported through `geometry_type`:
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/evals/mesh-vs-mesh \
+    -F 'target_file=@gt.ply' \
+    -F 'prediction_file=@pred.ply' \
+    -F 'options={"geometry_type":"pointcloud"}'
+```
+
+### Response Shape
+
+Evaluation responses include per-item or per-view metric values, not just
+means:
+
+```json
+{
+  "job_id": "...",
+  "status": "completed",
+  "mode": "image-vs-image",
+  "metrics": {
+    "image": [
+      {"name": "psnr", "values": [32.4]},
+      {"name": "ssim", "values": [0.91]}
+    ],
+    "geometry": null
+  },
+  "profile": null,
+  "artifacts": [],
+  "created_at": "...",
+  "completed_at": "..."
+}
+```
+
+Error responses use a consistent wrapper:
+
+```json
+{
+  "error": {
+    "code": "evaluation_failed",
+    "message": "...",
+    "details": {},
+    "job_id": "..."
+  }
+}
+```
+
+Validation errors that happen before a job is created do not include a
+`job_id`. Evaluator failures and artifact persistence failures mark the job as
+`failed` and include the `job_id` in the error body.
+
+### Runtime Files
+
+The service stores runtime files under `runs/service/`:
+
+```text
+runs/service/
+├── service.sqlite3
+├── uploads/{job_id}/{uuid}.{suffix}
+└── artifacts/{job_id}/{artifact_id}.png
+```
+
 ## Dependencies
 
 | Package | Purpose |
@@ -426,3 +580,13 @@ rb visualize-pcd ref.ply pred.ply -o overlay.png --elevation 40 --azimuth 135
 | `open3d` | Geometry I/O, mesh metrics, offscreen rendering |
 | `torchmetrics` | SSIM (windowed), LPIPS implementations |
 | `Pillow` | Image file I/O |
+
+Optional service dependencies are installed with `--extra service`:
+
+| Package | Purpose |
+|---|---|
+| `fastapi` | HTTP API framework |
+| `uvicorn[standard]` | ASGI server |
+| `pydantic` | Request and response models |
+| `aiosqlite` | SQLite persistence |
+| `python-multipart` | Multipart upload parsing |
