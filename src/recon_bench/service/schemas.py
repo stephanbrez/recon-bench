@@ -211,3 +211,38 @@ class ErrorResponse(pydantic.BaseModel):
     """Top-level error response wrapper."""
 
     error: ErrorDetail
+
+
+OPENAPI_MODELS: tuple[type[pydantic.BaseModel], ...] = (
+    CameraIn,
+    ImageVsImageOptions,
+    ImageVsMeshOptions,
+    MeshVsMeshOptions,
+    MetricValue,
+    MetricsOut,
+    ArtifactOut,
+    ProfileOut,
+    EvalResponse,
+    ErrorDetail,
+    ErrorResponse,
+)
+
+
+def openapi_components() -> dict[str, object]:
+    """Return service schema components for OpenAPI.
+
+    Returns
+    -------
+    dict[str, object]
+        Pydantic schemas keyed by component name.
+    """
+    components: dict[str, object] = {}
+    for model in OPENAPI_MODELS:
+        schema = model.model_json_schema(
+            ref_template="#/components/schemas/{model}",
+        )
+        definitions = schema.pop("$defs", {})
+        if isinstance(definitions, dict):
+            components.update(definitions)
+        components[model.__name__] = schema
+    return components

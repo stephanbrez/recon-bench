@@ -94,7 +94,10 @@ def _state(request: fastapi.Request) -> ServiceState:
     )
 
 
-def _parse_options(raw: str, model_type: type[OptionsModel]) -> OptionsModel:
+def _parse_options_json(
+    raw: str,
+    model_type: type[OptionsModel],
+) -> OptionsModel:
     try:
         return model_type.model_validate_json(raw)
     except pydantic.ValidationError as exc:
@@ -102,6 +105,60 @@ def _parse_options(raw: str, model_type: type[OptionsModel]) -> OptionsModel:
             status_code=422,
             detail=json.loads(exc.json()),
         ) from exc
+
+
+def _image_vs_image_options(
+    options: typing.Annotated[str, fastapi.Form()] = "{}",
+) -> service_schemas.ImageVsImageOptions:
+    """Parse image-vs-image options from the multipart form field.
+
+    Parameters
+    ----------
+    options
+        JSON string submitted in the ``options`` form field.
+
+    Returns
+    -------
+    service_schemas.ImageVsImageOptions
+        Validated options model.
+    """
+    return _parse_options_json(options, service_schemas.ImageVsImageOptions)
+
+
+def _image_vs_mesh_options(
+    options: typing.Annotated[str, fastapi.Form()],
+) -> service_schemas.ImageVsMeshOptions:
+    """Parse image-vs-mesh options from the multipart form field.
+
+    Parameters
+    ----------
+    options
+        JSON string submitted in the ``options`` form field.
+
+    Returns
+    -------
+    service_schemas.ImageVsMeshOptions
+        Validated options model.
+    """
+    return _parse_options_json(options, service_schemas.ImageVsMeshOptions)
+
+
+def _mesh_vs_mesh_options(
+    options: typing.Annotated[str, fastapi.Form()] = "{}",
+) -> service_schemas.MeshVsMeshOptions:
+    """Parse mesh-vs-mesh options from the multipart form field.
+
+    Parameters
+    ----------
+    options
+        JSON string submitted in the ``options`` form field.
+
+    Returns
+    -------
+    service_schemas.MeshVsMeshOptions
+        Validated options model.
+    """
+    return _parse_options_json(options, service_schemas.MeshVsMeshOptions)
 
 
 def _error_response(
@@ -334,11 +391,12 @@ async def image_vs_image(
     request: fastapi.Request,
     target_files: list[fastapi.UploadFile] = fastapi.File(...),
     prediction_files: list[fastapi.UploadFile] = fastapi.File(...),
-    options: str = fastapi.Form("{}"),
+    options: service_schemas.ImageVsImageOptions = fastapi.Depends(
+        _image_vs_image_options,
+    ),
 ) -> service_schemas.EvalResponse:
     """Evaluate uploaded prediction images against target images."""
     state = _state(request)
-    parsed = _parse_options(options, service_schemas.ImageVsImageOptions)
 
     if len(target_files) != len(prediction_files) or not target_files:
         await service_storage.close_uploads(target_files + prediction_files)
@@ -372,18 +430,18 @@ async def image_vs_image(
     return await _execute_job(
         state=state,
         job_id=job_id,
-        options=parsed,
+        options=options,
         prepared=PreparedEvaluation(
             mode=service_schemas.EvalMode.IMAGE_VS_IMAGE,
             evaluate_kwargs={
                 "target": targets,
                 "prediction": predictions,
                 "mode": "image_vs_image",
-                "image_metrics": parsed.metrics,
-                "profile": parsed.profile,
-                "shard_size": parsed.shard_size,
-                "max_size": parsed.max_size,
-                "background_color": parsed.normalized_background_color(),
+                "image_metrics": options.metrics,
+                "profile": options.profile,
+                "shard_size": options.shard_size,
+                "max_size": options.max_size,
+                "background_color": options.normalized_background_color(),
             },
             save_renders=False,
         ),
@@ -398,12 +456,13 @@ async def image_vs_mesh(
     request: fastapi.Request,
     target_files: list[fastapi.UploadFile] = fastapi.File(...),
     prediction_file: fastapi.UploadFile = fastapi.File(...),
-    options: str = fastapi.Form(...),
+    options: service_schemas.ImageVsMeshOptions = fastapi.Depends(
+        _image_vs_mesh_options,
+    ),
 ) -> service_schemas.EvalResponse:
     """Evaluate uploaded target images against an uploaded mesh."""
     state = _state(request)
-    parsed = _parse_options(options, service_schemas.ImageVsMeshOptions)
-    cameras = parsed.camera_input()
+    cameras = options.camera_input()
     expected_targets = len(cameras) if isinstance(cameras, list) else 1
 
     if len(target_files) != expected_targets:
@@ -438,7 +497,7 @@ async def image_vs_mesh(
     return await _execute_job(
         state=state,
         job_id=job_id,
-        options=parsed,
+        options=options,
         prepared=PreparedEvaluation(
             mode=service_schemas.EvalMode.IMAGE_VS_MESH,
             evaluate_kwargs={
@@ -446,13 +505,13 @@ async def image_vs_mesh(
                 "prediction": predictions[0],
                 "mode": "image_vs_mesh",
                 "camera": cameras,
-                "image_metrics": parsed.metrics,
-                "profile": parsed.profile,
-                "shard_size": parsed.shard_size,
-                "max_size": parsed.max_size,
-                "background_color": parsed.normalized_background_color(),
+                "image_metrics": options.metrics,
+                "profile": options.profile,
+                "shard_size": options.shard_size,
+                "max_size": options.max_size,
+                "background_color": options.normalized_background_color(),
             },
-            save_renders=parsed.save_renders,
+            save_renders=options.save_renders,
         ),
     )
 
@@ -465,11 +524,12 @@ async def mesh_vs_mesh(
     request: fastapi.Request,
     target_file: fastapi.UploadFile = fastapi.File(...),
     prediction_file: fastapi.UploadFile = fastapi.File(...),
-    options: str = fastapi.Form("{}"),
+    options: service_schemas.MeshVsMeshOptions = fastapi.Depends(
+        _mesh_vs_mesh_options,
+    ),
 ) -> service_schemas.EvalResponse:
     """Evaluate uploaded geometry files against each other."""
     state = _state(request)
-    parsed = _parse_options(options, service_schemas.MeshVsMeshOptions)
     job_id = str(uuid.uuid4())
 
     try:
@@ -495,24 +555,24 @@ async def mesh_vs_mesh(
     return await _execute_job(
         state=state,
         job_id=job_id,
-        options=parsed,
+        options=options,
         prepared=PreparedEvaluation(
             mode=service_schemas.EvalMode.MESH_VS_MESH,
             evaluate_kwargs={
                 "target": targets[0],
                 "prediction": predictions[0],
                 "mode": "mesh_vs_mesh",
-                "camera": parsed.camera_input(),
-                "image_metrics": parsed.metrics,
-                "image_eval": parsed.image_eval,
-                "geometry_type": parsed.geometry_type,
-                "num_points": parsed.num_points,
-                "profile": parsed.profile,
-                "shard_size": parsed.shard_size,
-                "max_size": parsed.max_size,
-                "background_color": parsed.normalized_background_color(),
+                "camera": options.camera_input(),
+                "image_metrics": options.metrics,
+                "image_eval": options.image_eval,
+                "geometry_type": options.geometry_type,
+                "num_points": options.num_points,
+                "profile": options.profile,
+                "shard_size": options.shard_size,
+                "max_size": options.max_size,
+                "background_color": options.normalized_background_color(),
             },
-            save_renders=parsed.save_renders,
+            save_renders=options.save_renders,
         ),
     )
 
