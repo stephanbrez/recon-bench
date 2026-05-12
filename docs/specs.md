@@ -803,6 +803,15 @@ Deferred service features:
 | Multi-view `image_vs_mesh` requires matching `list[ImageInput]` | Each camera needs its own reference image; mismatched counts are a `ValueError` |
 | Shared `utils/format.py` for display | Both `ProfileResult.summary()` and `EvalResult.summary()` use the same table/tree primitives; no external dep (e.g. rich) needed |
 | `EvalResult.summary()` with optional filenames | Provides a ready-made report; filenames give human-friendly row labels without coupling to I/O |
+| Service: thin layer over `evaluate()` | One evaluator code path shared by library, CLI, and service — no behavioral drift between surfaces |
+| Service: upload-only (no server-local paths) | Local-file inputs are the CLI's domain; keeps the HTTP surface filesystem-agnostic |
+| Service: synchronous endpoints (no background queue) | One round-trip per request; producer/consumer queue and SSE deferred to future work |
+| Service: worker thread + GPU semaphore | `evaluate()` is synchronous and GPU-heavy; bounds GPU contention and OOM risk while keeping upload/validation concurrent |
+| Service: atomic evaluation per job | Mirrors the library's single-`EvalResult` pattern; no partial-metric success representation |
+| Service: artifact saving after `evaluate()` returns | Frees the GPU semaphore before disk I/O so the next job can start sooner |
+| Service: Pydantic schemas mirror core types | HTTP surface tracks the Python surface without drift; `Camera` validation stays strict |
+| Service: UUID-named uploads under `{job_id}/` | Client filenames are untrusted input; avoids collisions and path traversal |
+| Service: SQLite for job persistence | Embedded; no extra process to run for MVP deployment |
 
 ## Dependencies
 

@@ -5,9 +5,68 @@ A modular 3D reconstruction benchmarking toolkit. Evaluate reconstruction
 quality across three modes — image vs image, image vs mesh, mesh vs mesh —
 with a single function call.
 
+## Contents
+
+- [Design Notes](#design-notes)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Evaluation Modes](#evaluation-modes)
+- [Camera](#camera)
+- [Multi-View Evaluation](#multi-view-evaluation)
+- [Metrics](#metrics)
+- [Package-Level API](#package-level-api)
+- [Performance Profiling](#performance-profiling)
+- [CLI](#cli)
+- [HTTP API Service](#http-api-service)
+- [Dependencies](#dependencies)
+
+## Design Notes
+
+### Polymorphic input acceptance
+
+Making the evaluation abstraction accept multiple inputs reduces glue code at call sites. Users send in what they have, and the orchestrator takes care of maintaining a single normalized internal representation.
+
+### On-device tensors throughout
+
+Inputs are normalized into `torch.Tensor` early to avoid CPU/GPU ping-pong, keep dtypes/ranges consistent, and make batching the default fast path.
+
+### Batching everywhere
+
+With batching used at every level, users can call any layer directly without the orchestrator for maximum flexibility. It also means metric outputs stay uniform: per-item (or per-view) scores are preserved as vectors that you can reduce with standard tensor ops.
+
+### Open3D
+
+Open3D is used for all mesh operations and rendering. It has a simple, stable API without the overhead of differentiability or ML features (PyTorch3D).
+
+### Result objects instead of raw return values
+
+A single result object keeps the API surface stable as new metrics/metadata get added. It also preserves the per-item/per-view detail and makes failures inspectable.
+
+### Profiling with nesting
+
+Separate performance profiling of execution time and GPU memory adds more evaluation criteria beyond visual outputs. Nesting allows for stage-specific (load/normalize/render/metric) profiling. The timing profiler uses CUDA sync because GPU work is async and would cause undercounting when the timer stops before the kernel does. Profile data attaches to the result object for later inspection. A no-op toggle makes the profiler "opt-in" so it can live in a codebase without overhead or clutter.
+
+### CLI
+
+For evaluating pre-existing assets, or when the overhead of adding more code is too high, a CLI makes more sense. Especially when the reconstruction pipeline and outputs live on different hardware. A CLI also allows for adding small utilities to aid in evaluation, e.g. `rb visualize-pcd` for rendering point clouds.
+
+### API service
+
+The optional HTTP service is intentionally a thin, additive layer over `recon_bench.evaluate()`. It's upload-only, since server-local files can be used with the CLI. Jobs and artifacts are tracked with explicit lifecycle states so that they can be easily recalled without having to re-run the evaluations.
+
+### Schemas
+
+Requests are "files + options": uploads arrive as multipart files, and structured settings are parsed from a JSON `options` field into Pydantic models (a limitation of multi-part forms). The models largely mirror core types (notably `Camera`) so validation stays strict (sane defaults). The HTTP surface tracks the Python surface without drift. Responses preserve the library's per-item/per-view semantics and the response shape stays aligned with the result-object pattern to maintain stability through future additions.
+
+### Concurrency
+
+`evaluate()` is synchronous and can be GPU-heavy, so the service runs it in a worker thread behind a configurable GPU semaphore (default 1). That makes upload/validation concurrent across requests while keeping GPU contention and OOM risk under control. Evaluation is atomic at the service layer (any evaluator error fails the job) to mirror the Python API's single results object. Artifact saving is deliberately done after evaluation so the next job can start as soon as the semaphore is released.
+
 ## Installation
 
 ```bash
+git clone https://github.com/stephanbrez/recon-bench.git
+cd recon-bench
 uv sync
 ```
 
